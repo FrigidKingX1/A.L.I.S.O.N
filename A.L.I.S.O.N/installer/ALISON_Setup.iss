@@ -57,7 +57,7 @@ Name: "{commondesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: 
 
 [Run]
 ; Phase 4: hydrate model weights during install (long, network + ~4.9 GB disk).
-Filename: "{app}\{#MyAppHydrateExeName}"; Description: "Downloading A.L.I.S.O.N. model weights (this may take a while)..."; Flags: postinstall runascurrentuser
+Filename: "{app}\{#MyAppHydrateExeName}"; Description: "Downloading A.L.I.S.O.N. model weights (this may take a while)..."; Flags: postinstall runascurrentuser; Check: ShouldRunInteractivePostInstall
 ; Launch the GUI once install completes.
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
 
@@ -158,6 +158,14 @@ begin
   begin
     MsgBox('Could not automatically detect GPU VRAM. Please ensure you have an 8 GB VRAM GPU installed.', mbInformation, MB_OK);
   end;
+end;
+
+function ShouldRunInteractivePostInstall(): Boolean;
+begin
+  // Skip the post-install model download / GUI launch when the installer runs
+  // silently (automated deployments must not trigger an interactive ~4.9 GB
+  // download or spawn the GUI). Interactive installs are unaffected.
+  Result := not WizardSilent;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
