@@ -52,30 +52,30 @@ from PyInstaller.utils.hooks import collect_all
 for pkg in ("torch", "llama_cpp"):
     try:
         d, b, h = collect_all(pkg)
-        # collect_all() may return 2-tuples (src, dest); PyInstaller's TOC
-        # needs 3-tuples (dest_name, src_name, typecode). Expand defensively,
-        # and skip directories / package metadata (opening those as files on
-        # Windows raises PermissionError).
-        def _src_of(entry):
+        # collect_all() returns (src, dest_dir) 2-tuples for both datas and
+        # binaries. The dest_dir is the package-relative DIRECTORY (e.g.
+        # "llama_cpp\lib"), NOT the full file path. PyInstaller's TOC needs the
+        # full destination name (dir + filename); otherwise it tries to extract
+        # a FILE named "llama_cpp\lib" and fails with
+        # "Failed to extract llama_cpp\lib: failed to open target file", which
+        # aborts the frozen Core at bootstrap. Reconstruct the full dest, route
+        # shared libs (.dll/.pyd/.so) to binaries, dedupe by dest.
+        _seen = set()
+        for entry in list(d) + list(b):
             if len(entry) == 2:
-                return entry[0]
-            return entry[1]
-        for entry in d:
-            src = _src_of(entry)
+                src, dest_dir = entry
+            else:
+                dest_dir, src = entry[0], entry[1]
             if os.path.isdir(src) or src.endswith((".dist-info", ".egg-info", ".egg-link")):
                 continue
-            if len(entry) == 2:
-                a.datas.append((entry[1], src, "DATA"))
-            else:
-                a.datas.append(tuple(entry))
-        for entry in b:
-            src = _src_of(entry)
-            if os.path.isdir(src) or src.endswith((".dist-info", ".egg-info", ".egg-link")):
+            dest = os.path.join(dest_dir, os.path.basename(src)) if len(entry) == 2 else dest_dir
+            if dest in _seen:
                 continue
-            if len(entry) == 2:
-                a.binaries.append((entry[1], src, "BINARY"))
+            _seen.add(dest)
+            if src.lower().endswith((".dll", ".pyd", ".so", ".dylib")):
+                a.binaries.append((dest, src, "BINARY"))
             else:
-                a.binaries.append(tuple(entry))
+                a.datas.append((dest, src, "DATA"))
         a.hiddenimports += h
     except Exception as exc:  # pragma: no cover
         print("collect_all warning for", pkg, ":", exc)
@@ -95,7 +95,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     runtime_tmpdir=None,
     console=True,
     icon=ICON,
