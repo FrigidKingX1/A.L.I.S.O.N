@@ -43,6 +43,7 @@ class Bridge(QObject):
     eventReceived = pyqtSignal(str, str)        # topic, text
     overlayRequested = pyqtSignal(bool)         # show?
     statusChanged = pyqtSignal()
+    diagnosticsChanged = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -55,6 +56,16 @@ class Bridge(QObject):
         self._core_proc = None
         self._pop_count = 0
         self._listening = False
+        self._stop_requested = False
+        self._diagnostics = {
+            "coreVersion": "", "uptime_s": 0, "device": "", "gpuName": "",
+            "ramGB": 0.0, "vramGB": 0.0, "modelLoaded": False,
+            "modelPath": "", "modelFile": "", "modelSizeGB": 0.0,
+            "screenSense": False, "screenpipe": False, "actionExecutor": None,
+            "gamma": None, "corePid": None, "coreFailures": 0,
+            "installDir": "", "stateDir": "", "modelsDir": "", "logPath": "",
+            "logTail": "",
+        }
 
     # --- properties exposed to QML ---
     @pyqtProperty(float, notify=telemetryUpdated)
@@ -103,6 +114,11 @@ class Bridge(QObject):
             self._listening = v
             self.statusChanged.emit()
 
+    @pyqtProperty("QVariant", notify=diagnosticsChanged)
+    def diagnostics(self):
+        """Live diagnostics map surfaced to the QML settings tab."""
+        return self._diagnostics
+
     # --- called from worker threads ---
     def push_telemetry(self, affect, gamma, drives):
         self._gamma = gamma
@@ -140,8 +156,13 @@ class Bridge(QObject):
             msg = {"cmd": action}
             if isinstance(params, dict):
                 msg.update(params)
+            import zmq
+            creq.setsockopt(zmq.RCVTIMEO, 1500)
             creq.send_json(msg)
-            reply = creq.recv_json()
+            try:
+                reply = creq.recv_json()
+            except Exception:
+                reply = {"ok": False, "error": "no reply (core offline?)"}
             creq.close()
             cctx.term()
             self.eventReceived.emit("control", f"{action} -> {reply}")
@@ -173,6 +194,7 @@ class Bridge(QObject):
         if self._core_online:
             self.eventReceived.emit("control", "Core already online; reusing instance.")
             return
+        self._stop_requested = False
         try:
             import subprocess
             import tempfile
@@ -197,6 +219,103 @@ class Bridge(QObject):
         except Exception as exc:
             self._core_proc = None
             self.eventReceived.emit("control", f"launch failed: {exc}")
+
+    # --- diagnostics / settings-tab support ---
+    @staticmethod
+    def _tail_log(path, n=40):
+        try:
+            with open(path, "rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                chunk = min(size, 16384)
+                f.seek(max(0, size - chunk))
+                data = f.read().decode("utf-8", errors="replace")
+            lines = data.splitlines()
+            return "\n".join(lines[-n:])
+        except Exception:
+            return ""
+
+    @pyqtSlot()
+    def refreshDiagnostics(self):
+        """Local filesystem snapshot: paths, model size, process, log tail."""
+        import tempfile
+        d = self._diagnostics
+        state = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        state_dir = os.path.join(state, "A.L.I.S.O.N.")
+        models_dir = os.path.join(state_dir, "models")
+        log_path = os.path.join(state_dir, "logs", "alison_core.out.log")
+        if not os.path.exists(log_path):
+            log_path = os.path.join(tempfile.gettempdir(), "alison_core.out.log")
+        d["stateDir"] = state_dir
+        d["modelsDir"] = models_dir
+        d["installDir"] = os.path.dirname(sys.executable)
+        d["logPath"] = log_path
+        model_path = os.path.join(models_dir, "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf")
+        d["modelFile"] = model_path
+        d["modelSizeGB"] = round(os.path.getsize(model_path) / 1e9, 2) if os.path.exists(model_path) else 0.0
+        proc = self._core_proc
+        d["corePid"] = proc.pid if (proc is not None and proc.poll() is None) else None
+        d["coreFailures"] = getattr(self, "_core_failures", 0)
+        d["logTail"] = self._tail_log(log_path)
+        self.diagnosticsChanged.emit()
+
+    @pyqtSlot()
+    def fetchStatus(self):
+        """Live Core state over IPC (get_status), parsed into the map."""
+        d = self._diagnostics
+        try:
+            cctx, creq = alison_ipc.AlisonIPC.make_control()
+            import zmq
+            creq.setsockopt(zmq.RCVTIMEO, 1500)
+            creq.send_json({"cmd": "get_status"})
+            r = creq.recv_json()
+            creq.close()
+            cctx.term()
+            d["coreVersion"] = r.get("core_version", "")
+            d["uptime_s"] = r.get("uptime_s", 0)
+            d["device"] = r.get("device", "")
+            d["gpuName"] = r.get("gpu_name") or ""
+            d["ramGB"] = round((r.get("ram_mb") or 0) / 1024.0, 1)
+            d["vramGB"] = round((r.get("vram_mb") or 0) / 1024.0, 1)
+            d["modelLoaded"] = bool(r.get("model_loaded"))
+            d["modelPath"] = r.get("model_path") or ""
+            d["screenSense"] = bool(r.get("screen_sense_enabled"))
+            d["screenpipe"] = bool(r.get("screenpipe_enabled"))
+            ae = r.get("action_executor_enabled")
+            d["actionExecutor"] = None if ae is None else bool(ae)
+            d["gamma"] = r.get("gamma")
+            self.coreOnline = True
+        except Exception:
+            d["actionExecutor"] = None
+            self.coreOnline = False
+        self.diagnosticsChanged.emit()
+
+    @pyqtSlot()
+    def stopCore(self):
+        """Terminate the managed Core child (watchdog is held off afterwards)."""
+        self._stop_requested = True
+        proc = getattr(self, "_core_proc", None)
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+                self.eventReceived.emit("control", "Core process terminated.")
+            except Exception as exc:
+                self.eventReceived.emit("control", f"stop core failed: {exc}")
+        else:
+            self.eventReceived.emit(
+                "control",
+                "No managed Core process to stop (external Core: close its console).")
+
+    @pyqtSlot()
+    def openLog(self):
+        p = self._diagnostics.get("logPath")
+        if p and os.path.exists(p):
+            try:
+                os.startfile(p)
+            except Exception as exc:
+                self.eventReceived.emit("control", f"open log failed: {exc}")
+        else:
+            self.eventReceived.emit("control", "Log file not found yet.")
 
     @pyqtSlot(int, int)
     def moveOverlay(self, dx, dy):
@@ -395,6 +514,8 @@ def main():
     watchdog = QTimer()
     watchdog.setInterval(5000)
     def _watchdog():
+        if bridge._stop_requested:
+            return
         proc = bridge._core_proc
         alive = proc is not None and proc.poll() is None
         if bridge.coreOnline:
@@ -411,6 +532,14 @@ def main():
         bridge.launchCore()
     watchdog.timeout.connect(_watchdog)
     watchdog.start()
+
+    # Diagnostics for the settings tab: keep paths/model/log/status fresh.
+    bridge.refreshDiagnostics()
+    diag = QTimer()
+    diag.setInterval(3000)
+    diag.timeout.connect(bridge.refreshDiagnostics)
+    diag.timeout.connect(bridge.fetchStatus)
+    diag.start()
 
     # Clean shutdown: terminate the Core child process when the GUI exits so it
     # does not linger (and keep spawning consoles) after the window closes.

@@ -54,6 +54,10 @@ desktop.ini
 # --- Agent / tooling state (NEVER track) ---
 .opencode/
 
+# --- A.L.I.S.O.N. runtime state (written by dev Core runs) ---
+alison_genome.json
+ica_persona.json
+
 # --- Sibling-project build artifacts & vendored environments ---
 # (keeps the repo as source; these are regenerable / exceed GitHub's 100 MB limit)
 .venv*/
