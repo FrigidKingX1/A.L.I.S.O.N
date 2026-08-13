@@ -1461,8 +1461,14 @@ def app_state_dir():
     """
     if getattr(sys, "frozen", False):
         base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-        return os.path.join(base, "A.L.I.S.O.N.")
-    return os.getcwd()
+        path = os.path.join(base, "A.L.I.S.O.N.")
+    else:
+        path = os.getcwd()
+    try:
+        os.makedirs(path, exist_ok=True)
+    except Exception:
+        pass
+    return path
 
 
 class Neocortex:

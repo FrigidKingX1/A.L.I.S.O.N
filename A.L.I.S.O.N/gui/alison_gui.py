@@ -175,8 +175,19 @@ class Bridge(QObject):
             return
         try:
             import subprocess
+            import tempfile
             cmd = self._core_command()
-            log_path = os.path.join(os.path.dirname(sys.executable), "alison_core.out.log")
+            # Never write next to the executable: a standard-user install under
+            # C:\Program Files\A.L.I.S.O.N\ has no write rights there (UAC),
+            # which caused [Errno 13] on the log open. Route to the writable
+            # per-user AppData location instead, with a temp-dir fallback.
+            state = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+            log_dir = os.path.join(state, "A.L.I.S.O.N.", "logs")
+            try:
+                os.makedirs(log_dir, exist_ok=True)
+                log_path = os.path.join(log_dir, "alison_core.out.log")
+            except Exception:
+                log_path = os.path.join(tempfile.gettempdir(), "alison_core.out.log")
             self._core_log = open(log_path, "ab", buffering=0)
             self._core_proc = subprocess.Popen(
                 cmd, stdout=self._core_log, stderr=self._core_log)
