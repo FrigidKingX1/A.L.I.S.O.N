@@ -58,13 +58,15 @@ class Bridge(QObject):
         self._listening = False
         self._stop_requested = False
         self._diagnostics = {
-            "coreVersion": "", "uptime_s": 0, "device": "", "gpuName": "",
-            "ramGB": 0.0, "vramGB": 0.0, "modelLoaded": False,
+            "coreVersion": "", "bootPhase": "", "uptime_s": 0, "device": "",
+            "gpuName": "", "ramGB": 0.0, "vramGB": 0.0, "modelLoaded": False,
             "modelPath": "", "modelFile": "", "modelSizeGB": 0.0,
             "screenSense": False, "screenpipe": False, "actionExecutor": None,
             "gamma": None, "corePid": None, "coreFailures": 0,
             "installDir": "", "stateDir": "", "modelsDir": "", "logPath": "",
-            "logTail": "",
+            "logTail": "", "screenNovelty": None, "screenGated": None,
+            "gpuUtil": None, "vramUsedMB": None, "vramTotalMB": None,
+            "gpuTempC": None,
         }
 
     # --- properties exposed to QML ---
@@ -157,7 +159,8 @@ class Bridge(QObject):
             if isinstance(params, dict):
                 msg.update(params)
             import zmq
-            creq.setsockopt(zmq.RCVTIMEO, 1500)
+            creq.setsockopt(zmq.RCVTIMEO, 3000)
+            creq.setsockopt(zmq.LINGER, 0)
             creq.send_json(msg)
             try:
                 reply = creq.recv_json()
@@ -211,8 +214,10 @@ class Bridge(QObject):
             except Exception:
                 log_path = os.path.join(tempfile.gettempdir(), "alison_core.out.log")
             self._core_log = open(log_path, "ab", buffering=0)
+            core_env = dict(os.environ)
+            core_env["PYTHONUNBUFFERED"] = "1"
             self._core_proc = subprocess.Popen(
-                cmd, stdout=self._core_log, stderr=self._core_log)
+                cmd, stdout=self._core_log, stderr=self._core_log, env=core_env)
             self.eventReceived.emit(
                 "control", "Core launch requested: " + " ".join(cmd) +
                 " | log: " + log_path)
@@ -266,12 +271,14 @@ class Bridge(QObject):
         try:
             cctx, creq = alison_ipc.AlisonIPC.make_control()
             import zmq
-            creq.setsockopt(zmq.RCVTIMEO, 1500)
+            creq.setsockopt(zmq.RCVTIMEO, 3000)
+            creq.setsockopt(zmq.LINGER, 0)
             creq.send_json({"cmd": "get_status"})
             r = creq.recv_json()
             creq.close()
             cctx.term()
             d["coreVersion"] = r.get("core_version", "")
+            d["bootPhase"] = r.get("boot_phase", "")
             d["uptime_s"] = r.get("uptime_s", 0)
             d["device"] = r.get("device", "")
             d["gpuName"] = r.get("gpu_name") or ""
@@ -284,6 +291,12 @@ class Bridge(QObject):
             ae = r.get("action_executor_enabled")
             d["actionExecutor"] = None if ae is None else bool(ae)
             d["gamma"] = r.get("gamma")
+            d["screenNovelty"] = r.get("screen_novelty")
+            d["screenGated"] = r.get("screen_gated")
+            d["gpuUtil"] = r.get("gpu_util_pct")
+            d["vramUsedMB"] = r.get("vram_used_mb")
+            d["vramTotalMB"] = r.get("vram_total_mb")
+            d["gpuTempC"] = r.get("gpu_temp_c")
             self.coreOnline = True
         except Exception:
             d["actionExecutor"] = None
@@ -414,6 +427,18 @@ class EventThread(QThread):
             state = (data.get("state") if isinstance(data, dict) else str(data))
             self.bridge.listening = (state == "listening")
             self.bridge.eventReceived.emit("ear", str(data))
+        elif topic == "hardware":
+            d = self.bridge._diagnostics
+            d["gpuUtil"] = data.get("gpu_util_pct")
+            d["vramUsedMB"] = data.get("vram_used_mb")
+            d["vramTotalMB"] = data.get("vram_total_mb")
+            d["gpuTempC"] = data.get("gpu_temp_c")
+            self.bridge.diagnosticsChanged.emit()
+        elif topic == "boot_state":
+            phase = data.get("phase", "")
+            if phase:
+                self.bridge._diagnostics["bootPhase"] = phase
+                self.bridge.diagnosticsChanged.emit()
         else:
             self.bridge.eventReceived.emit(topic, str(data))
 

@@ -35,6 +35,17 @@ import copy
 import argparse
 from collections import deque
 
+# Unbuffered, line-buffered stdout/stderr so logs stream live even when the
+# process is launched with its output redirected (GUI log tail, launch bats).
+if os.environ.get("PYTHONUNBUFFERED") != "1":
+    os.environ["PYTHONUNBUFFERED"] = "1"
+for _out_stream in (sys.stdout, sys.stderr):
+    try:
+        _out_stream.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+del _out_stream
+
 try:
     from llama_cpp import Llama
     HAS_LLAMA_CPP = True
@@ -46,6 +57,10 @@ try:
     HAS_SCREEN_SENSE = True
 except ImportError:
     HAS_SCREEN_SENSE = False
+
+# Phase 3: precision-weighted perceptual gate over the 6-dim PC state.
+perception_gateway = (alison_sense.PerceptionGateway()
+                      if HAS_SCREEN_SENSE else None)
 
 try:
     import alison_actions
@@ -1502,6 +1517,7 @@ class Neocortex:
                     n_threads = int(os.environ.get("ALISON_THREADS", os.cpu_count() or 8))
                     self._model = Llama(model_path=self.model_path, n_ctx=1024,
                                         n_threads=n_threads, n_gpu_layers=n_gpu_layers,
+                                        use_mmap=True, use_mlock=False,
                                         verbose=False)
                     print(f"[NEOCORTEX] 8B model loaded in {time.time()-t0:.1f}s")
                     self._loaded = True
@@ -1616,6 +1632,13 @@ def update_self_model_deterministic(limbic_system, world, screen_context=None):
     ctx_lower = (screen_context or "").lower()
     if HAS_SCREEN_SENSE and screen_context:
         pc_state = alison_sense.get_pc_state_from_context(screen_context)
+        if perception_gateway is not None:
+            gamma = float(active_inference.precision) if active_inference is not None else 1.0
+            allow, _novelty = perception_gateway.gate(pc_state, gamma=gamma)
+            if not allow:
+                print(f"  [SELF-MODEL (gated)] novelty={_novelty:.4f} below threshold -- "
+                      "expected context, affect unchanged")
+                return limbic_system.get_mood_label()
     else:
         if "error" in ctx_lower or "crash" in ctx_lower:
             pc_state[1] = 0.7
@@ -3515,6 +3538,26 @@ _ipc_stop = threading.Event()
 # Module boot timestamp (uptime) + release tag for diagnostics.
 BOOT_TS = time.time()
 CORE_VERSION = "3.0"
+# Boot-state machine (Phase 1 hardening): the control channel comes up BEFORE
+# the model is loaded so the GUI can observe and answer during the boot
+# window instead of blacking out for 2-4 minutes.
+BOOT_PHASE_CALIBRATING = "BOOTING_CALIBRATING"
+BOOT_PHASE_FISHER = "BOOTING_POPULATING_FISHER"
+BOOT_PHASE_MODEL = "BOOTING_LOADING_MODEL"
+BOOT_PHASE_RUNNING = "ONLINE_RUNNING"
+_boot_phase = BOOT_PHASE_CALIBRATING
+
+
+def _set_boot_phase(phase):
+    global _boot_phase
+    _boot_phase = phase
+    print(f"[BOOT] phase={phase}")
+    if ipc is not None:
+        try:
+            ipc.publish_event("boot_state", {"phase": phase,
+                                             "uptime_s": round(time.time() - BOOT_TS)})
+        except Exception:
+            pass
 ipc_control = {
     "screen_sense_enabled": HAS_SCREEN_SENSE,
     "gamma_bounds": (0.1, 2.0),
@@ -3588,8 +3631,15 @@ def _ipc_control_handler(cmd):
         model_size = None
         if model_path and os.path.exists(model_path):
             model_size = os.path.getsize(model_path)
+        hw = None
+        try:
+            import alison_hw
+            hw = alison_hw.read_once()
+        except Exception:
+            hw = None
         return {"ok": True,
                 "core_version": CORE_VERSION,
+                "boot_phase": _boot_phase,
                 "uptime_s": round(time.time() - BOOT_TS),
                 "device": str(device),
                 "gpu_name": gpu_name,
@@ -3603,7 +3653,15 @@ def _ipc_control_handler(cmd):
                 "gamma_bounds": list(ipc_control["gamma_bounds"]),
                 "gamma": float(active_inference.precision) if active_inference is not None else None,
                 "action_executor_enabled": action_executor.enabled if action_executor else None,
-                "cuda_paused": ipc_control.get("cuda_paused", False)}
+                "cuda_paused": ipc_control.get("cuda_paused", False),
+                "screen_novelty": (round(perception_gateway.last_novelty, 4)
+                                   if perception_gateway is not None else None),
+                "screen_gated": (perception_gateway.gated_count
+                                 if perception_gateway is not None else None),
+                "gpu_util_pct": hw.get("gpu_util_pct") if hw else None,
+                "vram_used_mb": hw.get("vram_used_mb") if hw else None,
+                "vram_total_mb": hw.get("vram_total_mb") if hw else None,
+                "gpu_temp_c": hw.get("gpu_temp_c") if hw else None}
     if action == "set_screen_sense":
         _set_screen_sense(cmd.get("enabled", True))
         return {"ok": True, "screen_sense_enabled": ipc_control["screen_sense_enabled"]}
@@ -3684,6 +3742,33 @@ def _ipc_screen_loop(stop_ev):
         time.sleep(2.0)
 
 
+def _screenpipe_gateway_loop(stop_ev):
+    """ALISON_SCREENPIPE=1 only: route Screenpipe OCR text through the
+    PerceptionGateway and publish novel states (Phase 3). OFF by default;
+    shares the same gateway instance as the alison_sense path."""
+    bridge = None
+    while not stop_ev.is_set():
+        try:
+            if not ipc_control.get("screenpipe_enabled", False):
+                stop_ev.wait(2.0)
+                continue
+            if bridge is None:
+                from alison_screenpipe import ScreenpipeBridge
+                bridge = ScreenpipeBridge(memory_index, device=device)
+            frame = bridge._fetch_latest_frame()
+            frame_text = bridge._extract(frame)[2] if frame else ""
+            if frame_text and perception_gateway is not None and ipc is not None:
+                pc = alison_sense.get_pc_state_from_context(frame_text)
+                gamma = float(active_inference.precision) if active_inference is not None else 1.0
+                allow, novelty = perception_gateway.gate(pc, gamma=gamma)
+                if allow and novelty > 0.0:
+                    ipc.publish_event("novelty", {"novelty": round(novelty, 4),
+                                                  "context": frame_text[:300]})
+        except Exception:
+            pass
+        stop_ev.wait(5.0)
+
+
 def _on_power_suspend():
     ipc_control["cuda_paused"] = True
     if ipc is not None:
@@ -3748,6 +3833,20 @@ def _ipc_init():
     ipc.start_control(_ipc_control_handler)
     threading.Thread(target=_ipc_telemetry_loop, args=(_ipc_stop,), daemon=True).start()
     threading.Thread(target=_ipc_screen_loop, args=(_ipc_stop,), daemon=True).start()
+    try:
+        import alison_hw
+        threading.Thread(target=alison_hw.start_hardware_monitor,
+                         args=(ipc, _ipc_stop), daemon=True).start()
+        print("[HW] NVML hardware telemetry thread started (1 Hz)")
+    except Exception as exc:
+        print(f"[HW][warn] hardware telemetry unavailable: {exc}")
+    if ipc_control.get("screenpipe_enabled", False):
+        try:
+            threading.Thread(target=_screenpipe_gateway_loop,
+                             args=(_ipc_stop,), daemon=True).start()
+            print("[SCREENPIPE] gateway feed thread started (ALISON_SCREENPIPE=1)")
+        except Exception as exc:
+            print(f"[SCREENPIPE][warn] gateway feed unavailable: {exc}")
     _register_power_events()
     print("[IPC] AlisonIPC online -- telemetry@127.0.0.1:5557 control@127.0.0.1:5558")
 
@@ -3812,9 +3911,16 @@ if __name__ == "__main__":
     _parser.add_argument("--ipc", action="store_true",
                          help="Headless IPC mode: publish telemetry/tokens for the Aether GUI")
     _args = _parser.parse_args()
+    # Phase 1 hardening: bring the control channel up BEFORE any calibration so
+    # the GUI can poll get_status / observe boot_state during the long model
+    # load instead of timing out through the whole boot window.
+    if _args.ipc:
+        _ipc_init()
     # Phase 0: Continuous Manifold Core Calibration (fixes generalization)
+    _set_boot_phase(BOOT_PHASE_CALIBRATING)
     calibrate_affective_core_v2(limbic_system, device)
     # Phase 0.5: Train MoodClassifier on the frozen core outputs (fixes FATIGUED/HUNGRY split)
+    _set_boot_phase(BOOT_PHASE_FISHER)
     train_mood_classifier_v3(limbic_system, limbic_system.mood_classifier, device)
     # Populate EWC from the 6 anchor states so learn_continuously applies penalty
     anchors = torch.tensor([[0.9,0.1,0.1,0.0,0.0,0.0],[0.1,0.9,0.1,0.0,0.0,0.0],
@@ -3823,10 +3929,9 @@ if __name__ == "__main__":
                            dtype=torch.float32, device=device)
     limbic_system.compute_fisher(anchors)
     # Phase 1: Direct Semantic Bridge calibration
+    _set_boot_phase(BOOT_PHASE_MODEL)
     calibrate_limbic_bridge(limbic_system, limbic_bridge, neocortex, device)
     neocortex.attach_bridge(limbic_bridge)
-    if _args.ipc:
-        _ipc_init()
 
 run_deep_toddler_phase_v2(world, other_agent, model)
 
@@ -3921,6 +4026,7 @@ def _process_user_text(ucmd):
 
 
 if __name__ == "__main__":
+    _set_boot_phase(BOOT_PHASE_RUNNING)
     while True:
         # Check if the Stream of Consciousness wants to speak
         if not action_queue.empty():

@@ -72,6 +72,12 @@ Item {
                         text: "Core version: " + (bridge.diagnostics.coreVersion || "—")
                         color: THEME.text; font.pixelSize: 11; font.family: "Consolas, monospace"
                     }
+                    Text {
+                        text: "Boot phase: " + (bridge.diagnostics.bootPhase || "—")
+                        color: bridge.diagnostics.bootPhase === "ONLINE_RUNNING" ? "#39d98a" :
+                               (bridge.diagnostics.bootPhase.length > 0 ? "#e0c35a" : THEME.muted)
+                        font.pixelSize: 11; font.family: "Consolas, monospace"
+                    }
                     Row {
                         spacing: 8
                         Button {
@@ -186,8 +192,26 @@ Item {
                     Text { text: "Device: " + (bridge.diagnostics.device || "—"); color: THEME.text; font.pixelSize: 11; font.family: "Consolas, monospace" }
                     Text { text: "GPU: " + (bridge.diagnostics.gpuName || "—"); color: THEME.text; font.pixelSize: 11; font.family: "Consolas, monospace" }
                     Text { text: "RAM: " + bridge.diagnostics.ramGB.toFixed(1) + " GB"; color: THEME.text; font.pixelSize: 11; font.family: "Consolas, monospace" }
-                    Text { text: "VRAM: " + (bridge.diagnostics.vramGB > 0 ? bridge.diagnostics.vramGB.toFixed(1) + " GB" : "—"); color: THEME.text; font.pixelSize: 11; font.family: "Consolas, monospace" }
-                    Text { text: "Precision γ: " + (bridge.diagnostics.gamma !== null ? bridge.diagnostics.gamma.toFixed(3) : "—"); color: THEME.violet; font.pixelSize: 11; font.family: "Consolas, monospace" }
+                    Text { text: "VRAM: " + (bridge.diagnostics.vramGB > 0 ? bridge.diagnostics.vramGB.toFixed(1) + " GB" : "—"); color: THEME.text; font.pixelSize: 11; font.family: "Consolas", monospace }
+                    Text {
+                        text: "GPU live: " +
+                              (bridge.diagnostics.gpuUtil !== null ?
+                               bridge.diagnostics.gpuUtil + "%  " +
+                               (bridge.diagnostics.vramUsedMB / 1024.0).toFixed(1) + " / " +
+                               (bridge.diagnostics.vramTotalMB / 1024.0).toFixed(1) + " GB VRAM  " +
+                               bridge.diagnostics.gpuTempC + "°C" : "—")
+                        color: bridge.diagnostics.gpuUtil !== null ? "#39d98a" : THEME.muted
+                        font.pixelSize: 11; font.family: "Consolas, monospace"
+                    }
+                    Text {
+                        text: "Perception novelty γ·‖Δpc‖: " +
+                              (bridge.diagnostics.screenNovelty !== null ?
+                               bridge.diagnostics.screenNovelty.toFixed(4) + "  (gated: " +
+                               bridge.diagnostics.screenGated + ")" : "—")
+                        color: bridge.diagnostics.screenNovelty !== null ? THEME.violet : THEME.muted
+                        font.pixelSize: 11; font.family: "Consolas, monospace"
+                    }
+                    Text { text: "Precision γ: " + (bridge.diagnostics.gamma !== null ? bridge.diagnostics.gamma.toFixed(3) : "—"); color: THEME.violet; font.pixelSize: 11; font.family: "Consolas", monospace }
                     Text {
                         text: "Screen sense: " + (bridge.diagnostics.screenSense ? "ON" : "off")
                         color: bridge.diagnostics.screenSense ? "#39d98a" : THEME.muted

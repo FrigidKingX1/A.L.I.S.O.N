@@ -22,5 +22,12 @@
     "hotkey": "ctrl+alt+k",
     "description": "Halts all OS interaction and terminates any in-flight execute_cmd subprocess."
   },
+  "signing": {
+    "enabled": false,
+    "key_id": "placeholder-tier3",
+    "algorithm": "hmac-sha256",
+    "signature": "",
+    "description": "Tier 3 scaffold: when enabled, privileged actions are denied unless the policy carries a valid HMAC-SHA256 signature (key supplied at runtime via ALISON_POLICY_KEY, never stored on disk)."
+  },
   "app_integrations": {}
 }

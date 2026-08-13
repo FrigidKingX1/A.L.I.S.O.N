@@ -12,6 +12,7 @@ without pywinauto or cached HF models.
 
 import threading
 import os
+import math
 import torch
 
 DEBUG = os.environ.get("SCREEN_SENSE_DEBUG") == "1"
@@ -175,6 +176,69 @@ def get_pc_state_from_context(context):
                   for label, mult in mapping["labels"].items())
         v[mapping["dim"]] = max(0.0, min(1.0, val))
     return v
+
+
+class PerceptionGateway:
+    """Precision-weighted perceptual gating (Active Inference flavour).
+
+    Maintains a rolling generative prior (EMA) over the 6-dim cognitive PC
+    state. Surprise = ||pc_t - prior||; salience = gamma * surprise where
+    gamma is the active-inference precision. The gate admits a state into
+    downstream cognition only when salience exceeds an adaptive threshold
+    (running mean + gate_sigma * sigma of surprise), so expected low-surprise
+    input is filtered while novel/uncertain states pass. The prior always
+    tracks reality -- the gate controls broadcast/use, not learning.
+    """
+
+    def __init__(self, dim=6, decay=0.75, gate_sigma=1.5, warmup=4,
+                 min_threshold=0.05):
+        self.dim = dim
+        self._decay = decay
+        self._gate_sigma = gate_sigma
+        self._warmup = warmup
+        self._min_threshold = min_threshold
+        self._prior = None
+        self._n = 0
+        self._em = 0.0
+        self._em2 = 0.0
+        self.last_surprise = 0.0
+        self.last_novelty = 0.0
+        self.pass_count = 0
+        self.gated_count = 0
+
+    def _threshold(self):
+        var = max(0.0, self._em2 - self._em * self._em)
+        return max(self._min_threshold,
+                   self._em + self._gate_sigma * math.sqrt(var))
+
+    def gate(self, pc_state, gamma=1.0):
+        """Return (allow, novelty) for a 6-dim pc_state tensor (CPU)."""
+        if pc_state is None:
+            return False, 0.0
+        if self._prior is None:
+            self._prior = pc_state.clone()
+            self._n += 1
+            self.last_surprise = 0.0
+            self.last_novelty = 0.0
+            self.pass_count += 1
+            return True, 0.0
+        surprise = float((pc_state - self._prior).norm())
+        self.last_surprise = surprise
+        self.last_novelty = gamma * surprise
+        self._em = self._decay * self._em + (1.0 - self._decay) * surprise
+        self._em2 = (self._decay * self._em2
+                     + (1.0 - self._decay) * surprise * surprise)
+        self._n += 1
+        self._prior = self._decay * self._prior + (1.0 - self._decay) * pc_state
+        if self._n <= self._warmup:
+            self.pass_count += 1
+            return True, self.last_novelty
+        allow = self.last_novelty > self._threshold()
+        if allow:
+            self.pass_count += 1
+        else:
+            self.gated_count += 1
+        return allow, self.last_novelty
 
 
 def screen_daemon():

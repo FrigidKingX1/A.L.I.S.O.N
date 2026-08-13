@@ -22,6 +22,13 @@ import shlex
 import subprocess
 import tempfile
 
+try:
+    import win32job
+    import win32con
+    HAS_WIN32_JOB = True
+except ImportError:
+    HAS_WIN32_JOB = False
+
 GBNF_SCHEMA = r"""
 root ::= object
 object ::= "{" ws keyvalue ws "}"
@@ -71,6 +78,81 @@ class ActionExecutor:
         self.policy = self._load_policy(policy_path)
         self.global_dry_run = os.environ.get("ALISON_GLOBAL_DRY_RUN", "").lower() in (
             "1", "true", "yes")
+        self._job_handle = None
+        self._setup_job_object()
+        signing = self.policy.get("signing", {}) or {}
+        self._signing_enabled = bool(signing.get("enabled", False))
+        self._signing_key = os.environ.get("ALISON_POLICY_KEY", "")
+        self._signature_valid = None
+
+    def _setup_job_object(self):
+        """Win32 Job Object with KILL_ON_JOB_CLOSE (Phase 2 hardening).
+
+        Every execute_cmd child is assigned to the job; when the Core process
+        dies (crash or exit), the kernel closes the job handle and kills the
+        entire action process tree -- no orphans survive the engine. The kill
+        switch uses the same handle to terminate the whole tree at once.
+        """
+        if not HAS_WIN32_JOB:
+            return
+        try:
+            create_fn = getattr(win32job, "CreateJobObjectW", None) or win32job.CreateJobObject
+            job = create_fn(None, "ALISON_ACTION_JOB")
+            info = win32job.QueryInformationJobObject(
+                job, win32job.JobObjectExtendedLimitInformation)
+            info["BasicLimitInformation"]["LimitFlags"] |= (
+                win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)
+            win32job.SetInformationJobObject(
+                job, win32job.JobObjectExtendedLimitInformation, info)
+            self._job_handle = job
+            print("[ACTIONS] Win32 Job Object active (KILL_ON_JOB_CLOSE) -- "
+                  "action process trees are contained.")
+        except Exception as exc:
+            self._job_handle = None
+            print(f"[ACTIONS][warn] job object unavailable, falling back to "
+                  f"direct process kill: {exc}")
+
+    def _assign_to_job(self, proc):
+        if not self._job_handle or proc is None or proc.poll() is not None:
+            return
+        try:
+            win32job.AssignProcessToJobObject(self._job_handle, int(proc._handle))
+        except Exception:
+            pass
+
+    def _resume_suspended(self, proc):
+        try:
+            import ctypes
+            ctypes.windll.ntdll.NtResumeProcess(int(proc._handle))
+        except Exception:
+            try:
+                proc.resume()  # psutil-style fallback, if available
+            except Exception:
+                pass
+
+    def _kill_job_tree(self):
+        if self._job_handle:
+            try:
+                win32job.TerminateJobObject(self._job_handle, 1)
+                return True
+            except Exception:
+                pass
+        return False
+
+    def _verify_policy_signing(self):
+        """Tier 3 signing scaffold: when policy signing is enabled, privileged
+        actions require a valid HMAC-SHA256 policy signature. Deny-by-default
+        when no key/signature is present."""
+        if not self._signing_enabled:
+            return True
+        if self._signature_valid is None:
+            try:
+                from alison_signing import verify_policy_signature
+                self._signature_valid = verify_policy_signature(
+                    self.policy, self._signing_key)
+            except Exception:
+                self._signature_valid = False
+        return self._signature_valid
 
     def _load_policy(self, path):
         try:
@@ -148,6 +230,13 @@ class ActionExecutor:
     def terminate_active(self):
         proc = self._active_process
         if proc is not None and proc.poll() is None:
+            if self._kill_job_tree():
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
+                self._active_process = None
+                return True
             try:
                 proc.terminate()
                 proc.wait(timeout=5)
@@ -156,6 +245,7 @@ class ActionExecutor:
                     proc.kill()
                 except Exception:
                     pass
+            self._active_process = None
             return True
         self._active_process = None
         return False
@@ -246,18 +336,28 @@ class ActionExecutor:
                 os.makedirs(jail, exist_ok=True)
             except Exception:
                 jail = tempfile.gettempdir()
+            creationflags = win32con.CREATE_SUSPENDED if HAS_WIN32_JOB else 0
             proc = subprocess.Popen(
                 command, shell=True, cwd=jail,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                creationflags=creationflags)
+            # Contain in the job before the process can run: assign while
+            # suspended, then resume its primary thread.
+            if HAS_WIN32_JOB:
+                try:
+                    self._assign_to_job(proc)
+                finally:
+                    self._resume_suspended(proc)
             self._active_process = proc
             out, err = proc.communicate(timeout=120)
             self._active_process = None
             return out if proc.returncode == 0 else (err or "command failed")
         except subprocess.TimeoutExpired:
-            try:
-                proc.kill()
-            except Exception:
-                pass
+            if not self._kill_job_tree():
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
             self._active_process = None
             return "timeout: command killed"
         except Exception as e:
@@ -281,6 +381,8 @@ class ActionExecutor:
 
         if tier == "privileged" and not (allow or confirmed):
             return "denied: privileged action requires allowlist match or confirmation"
+        if tier == "privileged" and not self._verify_policy_signing():
+            return "denied: privileged action requires a signed policy (Tier 3)"
 
         handlers = {
             "open_app": lambda: self._launch_app(args.get("name", "")),
