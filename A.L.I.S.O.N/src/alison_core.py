@@ -3512,10 +3512,16 @@ latent_memory = LatentMemory(dim=128)
 # ==================================================================
 ipc = None
 _ipc_stop = threading.Event()
+# Module boot timestamp (uptime) + release tag for diagnostics.
+BOOT_TS = time.time()
+CORE_VERSION = "3.0"
 ipc_control = {
     "screen_sense_enabled": HAS_SCREEN_SENSE,
     "gamma_bounds": (0.1, 2.0),
     "cuda_paused": False,
+    # W2 screenpipe adapter is optional / flag-gated: not wired into the
+    # runtime loop unless ALISON_SCREENPIPE=1 is set at launch.
+    "screenpipe_enabled": os.environ.get("ALISON_SCREENPIPE", "0") in ("1", "true", "yes"),
 }
 
 
@@ -3550,10 +3556,53 @@ def _ipc_control_handler(cmd):
     """Dispatch GUI control commands. Returns a JSON-serializable reply dict."""
     action = (cmd or {}).get("cmd")
     if action == "get_status":
+        # Diagnostics payload for the GUI settings tab: paths, model, hardware.
+        import ctypes
+        ram_mb = None
+        try:
+            class _MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong),
+                            ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong),
+                            ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong),
+                            ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong),
+                            ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+            st = _MEMORYSTATUSEX()
+            st.dwLength = ctypes.sizeof(st)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+                ram_mb = st.ullTotalPhys // (1024 * 1024)
+        except Exception:
+            ram_mb = None
+        vram_mb = None
+        gpu_name = None
+        if torch.cuda.is_available():
+            try:
+                vram_mb = torch.cuda.get_device_properties(0).total_memory // (1024 * 1024)
+                gpu_name = torch.cuda.get_device_name(0)
+            except Exception:
+                pass
+        model_path = neocortex.model_path if neocortex is not None else None
+        model_size = None
+        if model_path and os.path.exists(model_path):
+            model_size = os.path.getsize(model_path)
         return {"ok": True,
+                "core_version": CORE_VERSION,
+                "uptime_s": round(time.time() - BOOT_TS),
+                "device": str(device),
+                "gpu_name": gpu_name,
+                "ram_mb": ram_mb,
+                "vram_mb": vram_mb,
+                "model_loaded": bool(neocortex is not None and neocortex._loaded),
+                "model_path": model_path,
+                "model_size_bytes": model_size,
                 "screen_sense_enabled": ipc_control["screen_sense_enabled"],
+                "screenpipe_enabled": ipc_control.get("screenpipe_enabled", False),
                 "gamma_bounds": list(ipc_control["gamma_bounds"]),
                 "gamma": float(active_inference.precision) if active_inference is not None else None,
+                "action_executor_enabled": action_executor.enabled if action_executor else None,
                 "cuda_paused": ipc_control.get("cuda_paused", False)}
     if action == "set_screen_sense":
         _set_screen_sense(cmd.get("enabled", True))
