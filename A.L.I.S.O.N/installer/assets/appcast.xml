@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>A.L.I.S.O.N. Updates</title>
+    <link>https://example.invalid/alison/appcast.xml</link>
+    <description>Over-the-air update channel for A.L.I.S.O.N.</description>
+    <language>en</language>
+    <item>
+      <title>Version 1.0.0</title>
+      <sparkle:version>1.0.0</sparkle:version>
+      <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
+      <!--
+        OTA is scaffolded but inactive. To ship updates:
+        1. Build a new signed ALISON_Setup.exe (EV code-sign for SmartScreen trust).
+        2. Host it at a stable HTTPS URL.
+        3. Set the <enclosure> url= to that URL with the installer's length + sha256.
+        Until then the app's updater (if enabled) will see no newer release.
+      -->
+    </item>
+  </channel>
+</rss>

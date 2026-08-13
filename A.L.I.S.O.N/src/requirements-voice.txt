@@ -1,0 +1,17 @@
+# A.L.I.S.O.N. -- Voice I/O dependencies
+#
+# These power the optional "say things out loud" feature (ALISON_VOICE=1,
+# which is the default). alison_core.alison_vocalize() uses Kokoro (natural
+# neural TTS) first and transparently falls back to pyttsx3 (offline Windows
+# SAPI5) if Kokoro or its model/espeak-ng backend is unavailable.
+#
+# IMPORTANT: torch is NOT listed here -- it is already a hard requirement of
+# alison_core (the brain runtime). Kokoro reuses the existing torch install.
+#
+# `misaki` and `espeakng-loader` are pulled in transitively by kokoro and
+# provide the espeak-ng phonemizer backend, so no separate system espeak-ng
+# install is required on Windows.
+
+kokoro
+pyttsx3
+sounddevice

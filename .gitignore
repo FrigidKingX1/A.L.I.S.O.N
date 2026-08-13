@@ -1,0 +1,70 @@
+# A.L.I.S.O.N. workspace .gitignore
+# Heavy / regenerable / private artifacts are excluded so the git baseline
+# stays small and revertible.
+
+# --- Python ---
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# --- Build artifacts ---
+build_work/
+A.L.I.S.O.N/build/work/
+dist/
+A.L.I.S.O.N/dist/
+A.L.I.S.O.N/installer/installer_output/
+
+# --- Models & weights ---
+*.pt
+*.pth
+*.ggu
+*.gguf
+models/
+A.L.I.S.O.N/models/
+whisper/
+onnx/
+
+# --- Logs & diagnostics ---
+*.log
+*.jsonl
+Logs/
+A.L.I.S.O.N/logs/
+current_logs/
+old_logs/
+phase30_logs/
+auto_run*.log
+run*.log
+watchdog*.log
+diag*.log
+dual_brain_diag*.txt
+v22_full_output.txt
+
+# --- Large data ---
+*.pcap
+pxn_ground_truth.pcap
+
+# --- OS / editor ---
+Thumbs.db
+ehthumbs.db
+.DS_Store
+desktop.ini
+
+# --- Agent / tooling state (NEVER track) ---
+.opencode/
+
+# --- Sibling-project build artifacts & vendored environments ---
+# (keeps the repo as source; these are regenerable / exceed GitHub's 100 MB limit)
+.venv*/
+**/.venv*/
+**/node_modules/
+Projects/**/bin/
+Projects/**/obj/
+Experiments/**/bin/
+Experiments/**/obj/
+
+# --- Third-party binaries > GitHub's 100 MB hard limit ---
+**/ffmpeg.exe
+**/ffprobe.exe
+

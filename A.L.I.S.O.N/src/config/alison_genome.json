@@ -1,0 +1,1 @@
+{"genes": {"learning_rate": 0.0001015504314138546, "ewc_base_lambda": 1060.868933190835, "curiosity_weight": 1.7711671510678607e-06, "social_value": 0.08452877294225683, "battery_penalty": -0.1, "planning_depth": 3}, "epigenetic_rules": ["Avoid threats at all costs."], "fitness": 0.4309129772473597, "grid_size": 7}
