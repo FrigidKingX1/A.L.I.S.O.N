@@ -21,6 +21,11 @@ added_files = [
     (os.path.join(CONFIG, "alison_self_model.json"), "."),
     (os.path.join(CONFIG, "alison_persona.json"), "."),
     (os.path.join(CONFIG, "ica_persona.json"), "."),
+    # v3 policy/config consumed at runtime by alison_actions / alison_screenpipe.
+    # Preserve the "config/" subdir so the modules (which resolve config/*.json
+    # relative to their own __file__) find them inside the frozen bundle.
+    (os.path.join(CONFIG, "action_policy.json"), "config"),
+    (os.path.join(CONFIG, "capture_policy.json"), "config"),
 ]
 
 a = Analysis(

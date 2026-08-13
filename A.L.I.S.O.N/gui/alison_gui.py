@@ -176,8 +176,13 @@ class Bridge(QObject):
         try:
             import subprocess
             cmd = self._core_command()
-            self._core_proc = subprocess.Popen(cmd)
-            self.eventReceived.emit("control", "Core launch requested: " + " ".join(cmd))
+            log_path = os.path.join(os.path.dirname(sys.executable), "alison_core.out.log")
+            self._core_log = open(log_path, "ab", buffering=0)
+            self._core_proc = subprocess.Popen(
+                cmd, stdout=self._core_log, stderr=self._core_log)
+            self.eventReceived.emit(
+                "control", "Core launch requested: " + " ".join(cmd) +
+                " | log: " + log_path)
         except Exception as exc:
             self._core_proc = None
             self.eventReceived.emit("control", f"launch failed: {exc}")
@@ -372,16 +377,40 @@ def main():
     decay.start()
 
     # Watchdog: if the Core drops (crash) and no process is alive, relaunch it
-    # so the ambient copilot self-heals instead of staying brain-dead.
+    # so the ambient copilot self-heals instead of staying brain-dead. It caps
+    # at a few attempts so a persistently-failing Core (e.g. missing model
+    # weights) does not spawn an endless relaunch storm the user cannot escape.
+    bridge._core_failures = 0
     watchdog = QTimer()
     watchdog.setInterval(5000)
     def _watchdog():
         proc = bridge._core_proc
         alive = proc is not None and proc.poll() is None
-        if not bridge.coreOnline and not alive:
-            bridge.launchCore()
+        if bridge.coreOnline:
+            bridge._core_failures = 0
+            return
+        if alive:
+            return
+        bridge._core_failures += 1
+        if bridge._core_failures > 4:
+            bridge.eventReceived.emit(
+                "control",
+                "Core failed to start after several attempts -- see alison_core.out.log")
+            return
+        bridge.launchCore()
     watchdog.timeout.connect(_watchdog)
     watchdog.start()
+
+    # Clean shutdown: terminate the Core child process when the GUI exits so it
+    # does not linger (and keep spawning consoles) after the window closes.
+    def _cleanup_core():
+        proc = getattr(bridge, "_core_proc", None)
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+    app.aboutToQuit.connect(_cleanup_core)
 
     # Global hotkeys
     import keyboard
