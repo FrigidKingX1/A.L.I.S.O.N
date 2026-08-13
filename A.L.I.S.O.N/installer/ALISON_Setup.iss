@@ -84,25 +84,30 @@ function GlobalMemoryStatusEx(var lpBuffer: TMemoryStatusEx): BOOL;
 
 function GetGPUVRAMSize(): Int64;
 var
-  WbemServices: Variant;
-  WbemObjectSet: Variant;
-  WbemObject: Variant;
-  Locator: Variant;
-  vramStr: string;
+  WbemServices, WbemObjectSet, WbemObject, Locator: Variant;
+  i, cnt: Integer;
+  v: Int64;
 begin
+  // Returns the largest reported dedicated VRAM across ALL video controllers.
+  // Win32_VideoController.AdapterRAM is a 32-bit uint (caps at ~4 GB), so an
+  // 8 GB+ card typically reports ~4 GB here -- which still clears the >= 3.5 GB
+  // floor. We iterate EVERY controller and keep the max because the first
+  // adapter (ItemIndex(0)) is frequently a 0-VRAM "Basic Display Adapter".
   Result := 0;
   try
     Locator := CreateOleObject('WbemScripting.SWbemLocator');
     WbemServices := Locator.ConnectServer('.', 'root\cimv2');
-    // Query Video Controllers
     WbemObjectSet := WbemServices.ExecQuery('SELECT AdapterRAM FROM Win32_VideoController');
-    if not VarIsNull(WbemObjectSet) and (WbemObjectSet.Count > 0) then
+    cnt := WbemObjectSet.Count;
+    for i := 0 to cnt - 1 do
     begin
-       WbemObject := WbemObjectSet.ItemIndex(0);
-      // Note: WMI AdapterRAM is a 32-bit uint, so it caps at 4GB.
-      // We accept >= 3.5GB to avoid falsely blocking 8GB+ cards.
-      vramStr := WbemObject.AdapterRAM;
-      Result := StrToInt64Def(vramStr, 0);
+      try
+        WbemObject := WbemObjectSet.ItemIndex(i);
+        v := StrToInt64Def(WbemObject.AdapterRAM, 0);
+        if v > Result then Result := v;
+      except
+        // Skip individual controllers that fail to enumerate.
+      end;
     end;
   except
     Result := 0;
@@ -156,7 +161,9 @@ begin
   end
   else
   begin
-    MsgBox('Could not automatically detect GPU VRAM. Please ensure you have an 8 GB VRAM GPU installed.', mbInformation, MB_OK);
+    MsgBox('Could not automatically read GPU VRAM (this is non-blocking).' + #13#10 +
+           'A.L.I.S.O.N. will still install -- ensure your GPU has at least 8 GB VRAM for best performance.',
+           mbInformation, MB_OK);
   end;
 end;
 
