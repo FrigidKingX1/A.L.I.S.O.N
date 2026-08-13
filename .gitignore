@@ -68,3 +68,7 @@ Experiments/**/obj/
 **/ffmpeg.exe
 **/ffprobe.exe
 
+# --- Local sibling projects (source stays on disk, never tracked) ---
+Projects/
+Experiments/
+

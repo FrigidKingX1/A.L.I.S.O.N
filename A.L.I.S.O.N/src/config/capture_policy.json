@@ -1,0 +1,37 @@
+{
+  "_comment": "Canonical exclusion schema for A.L.I.S.O.N. perception + action layers. Written before any perception/action module initializes (W0). Consumed by alison_screenpipe.ScreenpipeBridge (W2) and alison_actions.ActionExecutor (W3). Matching is case-insensitive substring on app name, window title, or URL.",
+  "exclusions": {
+    "apps": [
+      "KeePass.exe",
+      "KeePass",
+      "Bitwarden.exe",
+      "Bitwarden",
+      "1Password.exe",
+      "1Password",
+      "Vault.exe",
+      "dashlane",
+      "lastpass",
+      "windowshellexperiencehost",
+      "lockapp"
+    ],
+    "windows": [
+      "Private Browsing",
+      "Incognito",
+      "InPrivate",
+      "Bank Account",
+      "Online Banking",
+      "Sign in to",
+      "Enter PIN",
+      "Credential",
+      "Password"
+    ],
+    "urls": [
+      "bank.com",
+      "paypal.com",
+      "chase.com",
+      "wellsfargo.com",
+      "amex.com",
+      "venmo.com"
+    ]
+  }
+}

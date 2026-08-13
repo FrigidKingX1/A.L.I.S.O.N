@@ -48,6 +48,14 @@ except ImportError:
     HAS_SCREEN_SENSE = False
 
 try:
+    import alison_actions
+    action_executor = alison_actions.ActionExecutor()
+    HAS_ACTION_EXECUTOR = True
+except ImportError:
+    action_executor = None
+    HAS_ACTION_EXECUTOR = False
+
+try:
     import win32event, win32api, win32gui, win32con
     HAS_WIN32 = True
 except ImportError:
@@ -2358,6 +2366,47 @@ class HippocampalMemoryIndex(nn.Module):
                 k = kv.unsqueeze(0)
                 self.M_t = self.retention * self.M_t + self.plasticity * (k.T @ k)
 
+    def forget_pattern(self, key_vec, erasure_rate=0.2):
+        """IBM Larimar-style selective unbinding for the Hippocampal index.
+
+        Degrades the Fast Weight matrix M_t by subtracting the key's
+        self-association (mirroring write_fast_weight, which accumulates
+        ``k.T @ k`` -- not the spec's ``k.T @ v`` form, so this matches what is
+        actually stored). In addition, the closest episodic entry is scrubbed
+        from X / embeddings so ``recall()`` degrades for that key, while all
+        other attractor basins are left intact. Used to purge sensitive screen
+        captures without corrupting the surrounding memory state.
+        """
+        with torch.no_grad():
+            k = self.encode_vsa(key_vec).unsqueeze(0)
+            self.M_t = self.M_t - erasure_rate * (k.T @ k)
+            if self.vsa_rows:
+                sims = F.cosine_similarity(
+                    k.squeeze(0).detach().cpu(), torch.stack(self.vsa_rows))
+                best = int(torch.argmax(sims).item())
+                if sims[best].item() > 0.8:
+                    self.embeddings.pop(best)
+                    self.texts.pop(best)
+                    self.valences.pop(best)
+                    self.vsa_rows.pop(best)
+                    self.rebuild_from_embeddings()
+
+    def consolidate(self, max_entries=2000):
+        """Bound unbounded growth of the human-readable recall lists (§4.3).
+
+        Drops the oldest entries beyond ``max_entries`` and rebuilds X / M_t from
+        the survivors so retrieval stays precise as N grows. Raw-frame retention
+        (e.g. Screenpipe's ~25 GB / 7-day window) is enforced on the capture
+        side; this keeps the in-process associative index bounded instead.
+        """
+        if len(self.embeddings) <= max_entries:
+            return
+        overflow = len(self.embeddings) - max_entries
+        self.embeddings = self.embeddings[overflow:]
+        self.texts = self.texts[overflow:]
+        self.valences = self.valences[overflow:]
+        self.rebuild_from_embeddings()
+
     def recall(self, query_embedding, k=3):
         if not self.vsa_rows:
             return []
@@ -3482,6 +3531,15 @@ def _set_screen_sense(enabled):
         alison_sense._stop.set()
 
 
+def dispatch_action(action_obj, confirmed=False):
+    """Gated entry point for OS actions (W3). The executor self-enforces the
+    kill-switch enabled flag and the privileged-tier confirmation/allowlist."""
+    global action_executor
+    if action_executor is None:
+        return "rejected: action executor unavailable"
+    return action_executor.execute(action_obj, confirmed=confirmed)
+
+
 def _ipc_control_handler(cmd):
     """Dispatch GUI control commands. Returns a JSON-serializable reply dict."""
     action = (cmd or {}).get("cmd")
@@ -3506,6 +3564,22 @@ def _ipc_control_handler(cmd):
             active_inference.precision_floor = lo
             active_inference.precision_ceiling = hi
         return {"ok": True, "gamma_bounds": [lo, hi]}
+    if action == "set_action_executor":
+        if action_executor is not None:
+            action_executor.enabled = bool(cmd.get("enabled", True))
+        return {"ok": True,
+                "action_executor_enabled": action_executor.enabled if action_executor else False}
+    if action == "execute_action":
+        if action_executor is None:
+            return {"ok": False, "error": "action executor unavailable"}
+        result = dispatch_action(cmd.get("action_obj") or cmd.get("args", {}),
+                                 confirmed=cmd.get("confirmed", False))
+        return {"ok": True, "result": result}
+    if action == "kill_switch":
+        if action_executor is not None:
+            action_executor.enabled = False
+            action_executor.terminate_active()
+        return {"ok": True, "action_executor_enabled": False}
     if action == "user_speech":
         text = (cmd.get("text") or "").strip()
         if text:
@@ -3915,6 +3989,9 @@ if __name__ == "__main__":
             print(f"\n  >>> [PROACTIVE] {proactive_monitor.proactive_message}")
             alison_vocalize(proactive_monitor.proactive_message)
             proactive_monitor.proactive_message = None
+        if getattr(proactive_monitor, "proactive_action", None) is not None:
+            dispatch_action(proactive_monitor.proactive_action)
+            proactive_monitor.proactive_action = None
 
         visualize_attention(model, tokenizer, workspace.broadcast)
     
@@ -4062,6 +4139,9 @@ if __name__ == "__main__":
             print(f"\n  >>> [PROACTIVE] {proactive_monitor.proactive_message}")
             alison_vocalize(proactive_monitor.proactive_message)
             proactive_monitor.proactive_message = None
+        if getattr(proactive_monitor, "proactive_action", None) is not None:
+            dispatch_action(proactive_monitor.proactive_action)
+            proactive_monitor.proactive_action = None
 
         # -- PHASE 17: PERSONA REFLECTION (every 20 cycles) --
         chat_history.append(f"Cycle {cycle_count}: Bat={world.battery:.0f} Act={action} O_bat={other_agent.battery:.0f} PE={prediction_error:.2f}")

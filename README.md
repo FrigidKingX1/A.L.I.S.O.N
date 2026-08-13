@@ -13,7 +13,9 @@ Coding Projects/
 ├── A.L.I.S.O.N/            ← tracked in git (this repository)
 │   ├── src/                engine: alison_core, alison_voice, alison_ear,
 │   │                       alison_ipc, alison_sense, alison_actions,
-│   │                       config/, tests/
+│   │                       alison_screenpipe (optional Screenpipe adapter),
+│   │                       config/ (genome, persona, capture_policy,
+│   │                       action_policy), tests/
 │   ├── gui/                PyQt6 ambient dashboard (alison_gui.py, qml/,
 │   │                       shaders/, requirements.txt, .venv)
 │   ├── installer/          ALISON_Setup.iss + assets/ (icon, wizard logo,
@@ -52,3 +54,47 @@ Run `ALISON_Setup.exe`:
    into the System Tray, and binds global hotkeys.
 
 Runtime state for frozen builds resolves to `%LOCALAPPDATA%\A.L.I.S.O.N.`.
+
+## v3 Capabilities
+
+### Build vs. Adopt
+A.L.I.S.O.N. deliberately **builds** its core cognition (ICA / Active Inference /
+Larimar memory / local voice+STT) so the stack is auditable, offline-first, and
+free of third-party runtime dependencies. For **perception grounding it selectively
+adopts** best-in-class tooling behind a flag-gated, config-driven adapter — e.g.
+Screenpipe for OCR/visual screen context — while keeping the home-grown
+`alison_sense.py` (UIA window text + DeBERTa + Go-Emotions, fully offline) as the
+default. Adopted components never become load-bearing: if the adapter is absent or
+offline, the system degrades silently to its built perception layer.
+
+See `A.L.I.S.O.N/docs/architecture_v3.md` for the full v3 design rationale.
+
+### Optional Screenpipe Ingestion (flag-gated)
+`src/alison_screenpipe.py` (`screenpipe_enabled`, default **OFF**) streams OCR /
+visual frames from a running Screenpipe daemon into the same
+`HippocampalMemoryIndex` used by the rest of A.L.I.S.O.N. It honors the canonical
+exclusion list in `src/config/capture_policy.json` (sensitive apps / windows / URLs),
+de-duplicates, gates writes on **attention-transition** events, and degrades to
+offline mode if the daemon is unreachable. Screenpipe is **not** bundled in the
+installer; the built-in `alison_sense.py` remains the default perception path.
+
+### Action Security Model (§5.3)
+`src/alison_actions.py` implements a **universal 3-tier capability dispatcher**
+(Tier 1 = structured app integration, Tier 2 = UIA/Win32, Tier 3 = vision grounding
+scaffold-only this release). All OS-mutating actions flow through one gate:
+
+- **Tier gating** — `privileged` actions (e.g. `execute_cmd`, `delete_file`) require
+  an allowlist match **or** explicit user confirmation; otherwise they are denied
+  by default.
+- **`execute_cmd` sandbox** — regex allowlist, a `workdir_jail` (auto-created),
+  forced dry-run preview for any filesystem-mutating command, and explicit
+  confirmation for everything else.
+- **Kill switch** — `Ctrl+Alt+K` (or the `kill_switch` IPC command) sets
+  `ActionExecutor.enabled = False` **and terminates any in-flight subprocess**
+  (`Popen.terminate()`), halting all further OS interaction immediately.
+- **Confirmation flow** — privileged actions are surfaced to the user and only
+  executed when `confirmed=True` arrives over IPC.
+
+Policy lives in `src/config/action_policy.json`; exclusions in
+`src/config/capture_policy.json`. Verified by `src/tests/test_action_security.py`,
+`test_larimar_unbinding.py`, and `test_screenpipe_bridge.py`.

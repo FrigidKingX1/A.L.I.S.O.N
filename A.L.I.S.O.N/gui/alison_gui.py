@@ -389,6 +389,7 @@ def main():
         keyboard.add_hotkey("alt+space", lambda: show_overlay(not overlay.isVisible()))
         keyboard.add_hotkey("ctrl+alt+a", dashboard.show)
         keyboard.add_hotkey("alt+v", lambda: bridge.sendCommand("start_listen"))
+        keyboard.add_hotkey("ctrl+alt+k", lambda: bridge.sendCommand("kill_switch"))
     except Exception:
         pass
 

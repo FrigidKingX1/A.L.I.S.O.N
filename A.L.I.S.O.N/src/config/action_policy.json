@@ -1,0 +1,26 @@
+{
+  "_comment": "v3 action-security policy. Exclusions (apps/windows/urls) live in config/capture_policy.json (W0) and are consumed by the perception + action layers. This file governs action TIERS, the privileged execute_cmd sandbox, the kill switch, and the per-app capability-integration registry (Tier 1).",
+  "action_tiers": {
+    "passive": ["read_screen", "read_file", "inspect_window_title"],
+    "reversible": ["focus_window", "launch_app", "open_app", "input_key", "type_text", "write_file", "click"],
+    "privileged": ["execute_cmd", "delete_file", "format_drive"]
+  },
+  "execute_cmd": {
+    "require_confirmation": true,
+    "allowlist": [
+      "^git status$",
+      "^git diff$",
+      "^git log$",
+      "^python --version$",
+      "^echo ALLOWED$",
+      "^ping -n [0-9]+ 127\\.0\\.0\\.1$"
+    ],
+    "workdir_jail": "C:/Temp/ALISON_Action_Sandbox",
+    "global_dry_run_env": "ALISON_GLOBAL_DRY_RUN"
+  },
+  "kill_switch": {
+    "hotkey": "ctrl+alt+k",
+    "description": "Halts all OS interaction and terminates any in-flight execute_cmd subprocess."
+  },
+  "app_integrations": {}
+}
