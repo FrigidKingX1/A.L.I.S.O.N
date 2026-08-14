@@ -196,7 +196,7 @@ class AgentLM(nn.Module):
             sy = self.y_emb(torch.tensor(spatial_coords[1], device=input_ids.device))
             x = x + (sx + sy).unsqueeze(0).unsqueeze(0)
         if grounded_state is not None:
-            sensory_token = grounded_state.unsqueeze(0).unsqueeze(0)
+            sensory_token = grounded_state.to(input_ids.device).unsqueeze(0).unsqueeze(0)
             x = torch.cat([sensory_token, x], dim=1)
             T += 1
             if labels is not None:
@@ -220,7 +220,7 @@ class AgentLM(nn.Module):
             sy = self.y_emb(torch.tensor(spatial_coords[1], device=input_ids.device))
             x = x + (sx + sy).unsqueeze(0).unsqueeze(0)
         if grounded_state is not None:
-            sensory_token = grounded_state.unsqueeze(0).unsqueeze(0)
+            sensory_token = grounded_state.to(input_ids.device).unsqueeze(0).unsqueeze(0)
             x = torch.cat([sensory_token, x], dim=1)
             T += 1
         for block in self.blocks:
@@ -1528,6 +1528,9 @@ class Neocortex:
         self._bridge = bridge
 
     def _format_chat(self, system_prompt, user_input):
+        # llama_cpp prepends its own <|begin_of_text|>; strip any leading one we add
+        # to avoid the "duplicate leading begin_of_text" RuntimeWarning.
+        user_input = user_input[len("<|begin_of_text|>"):] if user_input.startswith("<|begin_of_text|>") else user_input
         prompt = f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{system_prompt}<|eot_id|>"
         prompt += f"<|start_header_id|>user<|end_header_id|>\n\n{user_input}<|eot_id|>"
         prompt += "<|start_header_id|>assistant<|end_header_id|>\n\n"
@@ -1544,7 +1547,8 @@ class Neocortex:
 
         prompt = self._format_chat(system_prompt, user_input)
         kwargs = dict(prompt=prompt, max_tokens=max_tokens, temperature=temperature,
-                      stop=["<|eot_id|>", "</s>"], echo=False)
+                      stop=["<|eot_id|>", "</s>"], echo=False,
+                      repeat_penalty=1.18, frequency_penalty=0.4, presence_penalty=0.2)
 
         if grammar:
             from llama_cpp import LlamaGrammar
@@ -1579,15 +1583,6 @@ class Neocortex:
                              max_tokens=max_tokens, temperature=temperature,
                              limbic_affect=limbic_affect, on_token=on_token)
 
-    def generate_thought(self, internal_prompt, max_tokens=30, temperature=0.8,
-                          limbic_affect=None, on_token=None):
-        """Generate a brief internal thought with optional mathematical bias."""
-        if not self.model:
-            return "."
-        sys_prompt = "You are Aether's deep subconscious. Generate one brief reflective thought."
-        return self.generate(internal_prompt, system_prompt=sys_prompt,
-                             max_tokens=max_tokens, temperature=temperature,
-                             limbic_affect=limbic_affect, on_token=on_token)
 
 
 # ==================================================================
@@ -1826,6 +1821,10 @@ def self_reflect(limbic_system, limbic_bridge, neocortex):
     global current_persona
     if len(chat_history) < 5:
         return
+    # EFE gate: only re-narrate identity when the agent's own prediction error is
+    # high. Calm cycles need no self-model rewrite (saves 8B calls). See P3.
+    if last_prediction_error <= EFE_THRESHOLD:
+        return
     print("\n  [METACOGNITION: Evolving Persona via 8B + GBNF...]")
     with model_lock:
         current_affect = limbic_system.affect_vector.clone()
@@ -1973,13 +1972,13 @@ class CorticalModule:
         self.last_output = ""
 
     def process(self, workspace_content):
+        # Subcortical modules run on an 844K char-level model that cannot produce
+        # legible free text (decoding collapses to repeated-character garbage). Keep
+        # the activation bookkeeping + workspace contribution, but emit a latent norm
+        # marker instead of decoded text. Readable "thoughts" come only from the 8B
+        # neocortex (METACOGNITION). See P2b analysis of the real run log.
         self.activation = min(1.0, self.activation + 0.3)
-        p = get_dynamic_persona()
-        persona_hint = f"Persona: {p['traits']} (mood={p['mood']}, rel={p.get('relationship','acquaintance')})"
-        rules_hint = f"Ancestral Rules: {' '.join(genome.epigenetic_rules)}"
-        prompt = f"{self.system_prompt}\n{persona_hint}\n{rules_hint}\n\nGlobal Workspace: {workspace_content}\n{self.name} output:"
-        output = generate_text(prompt, max_tokens=40, temp=self.temp)
-        self.last_output = output.split("\n")[0].strip()
+        self.last_output = f"[act={self.activation:.2f}]"
         return self.last_output
 
     def decay(self):
@@ -1989,19 +1988,9 @@ class CorticalModule:
 class TheoryOfMindModule(CorticalModule):
     """Models the internal state, beliefs, and actions of OTHER agents."""
     def process(self, workspace_content, other_agent_latent):
+        # See P2b: subcortical ToM module emits a latent marker, not char-model decode.
         self.activation = min(1.0, self.activation + 0.3)
-        latent_str = ", ".join([f"{x:.2f}" for x in other_agent_latent.cpu().numpy()])
-        p = get_dynamic_persona()
-        persona_hint = f"Persona: {p['traits']} (mood={p['mood']})"
-        rules_hint = f"Ancestral Rules: {' '.join(genome.epigenetic_rules)}"
-        prompt = (
-            f"{self.system_prompt}\n{persona_hint}\n{rules_hint}\n\n"
-            f"My Workspace: {workspace_content}\n"
-            f"Other Agent Neural State: [{latent_str}]\n"
-            f"ToM:"
-        )
-        output = generate_text(prompt, max_tokens=40, temp=self.temp)
-        self.last_output = output.split("\n")[0].strip()
+        self.last_output = f"[ToM act={self.activation:.2f}]"
         return self.last_output
 
 
@@ -2534,8 +2523,10 @@ class CorticalPipeline:
         p = get_dynamic_persona()
         persona_hint = f"Persona: {p['traits']} (mood={p['mood']})"
         mem_prompt = f"{modules['MEMORY'].system_prompt}\n{persona_hint}\nCurrent: {workspace.broadcast}\nPast: {mem_context}\nMemory:"
-        mem = generate_text(mem_prompt, max_tokens=40, temp=modules["MEMORY"].temp)
-        modules["MEMORY"].last_output = mem.split("\n")[0].strip()
+        # P2b: subcortical MEMORY module emits a latent-activation marker, not decoded
+        # char-model garbage. Past/fast-recall context is still surfaced via mem_context
+        # above; this only suppresses the per-cycle decode.
+        modules["MEMORY"].last_output = f"[MEM act={modules['MEMORY'].activation:.2f}]"
         workspace.add("MEMORY", modules["MEMORY"].last_output)
         self.stages.append(("MEMORY", modules["MEMORY"].last_output, modules["MEMORY"].activation))
         stage_ms["MEMORY"] = round((time.time() - t_s) * 1000, 1)
@@ -2582,6 +2573,9 @@ cortical_pipeline = CorticalPipeline()
 
 is_sleeping = threading.Event()
 BRAIN_SAVE_PATH = os.path.join(app_state_dir(), "ica_brain.pt")
+SNAPSHOT_VERSION = 3
+EFE_THRESHOLD = 0.35
+last_prediction_error = 0.0
 
 class _TrackedLock:
     """threading.Lock wrapper that records the holding thread, for diagnosing
@@ -2738,7 +2732,7 @@ def stream_of_consciousness():
 
         # Occasional Neocortex deep thought (every 5th idle monologue)
         neocortex_thought_counter += 1
-        if neocortex_thought_counter % 5 == 0:
+        if neocortex_thought_counter % 5 == 0 and last_prediction_error > EFE_THRESHOLD:
                 try:
                     affect_blurb = limbic_system.get_affect_prompt()
                     deep_thought = neocortex.generate_thought(
@@ -2823,13 +2817,15 @@ def metacognitive_loop(limbic_system, limbic_bridge, mood_classifier, tokenizer,
                 f"Internal state: mood={mood_label}, affect_norm={current_affect.norm().item():.2f}. "
                 f"Generate one brief first-person thought reflecting on your current state."
             )
-            thought = neocortex.generate_thought(monologue_prompt, max_tokens=30,
-                                                 temperature=0.8, limbic_affect=current_affect)
-            thought_sentiment = analyze_sentiment(thought).to(device)
-            with model_lock:
-                target_affect = current_affect.squeeze(0).squeeze(0).clone()
-                target_affect[:6] = target_affect[:6] + thought_sentiment
-                limbic_system.learn_continuously(pc_state, target_affect.unsqueeze(0).unsqueeze(0))
+            thought = "SILENT"
+            if last_prediction_error > EFE_THRESHOLD:
+                thought = neocortex.generate_thought(monologue_prompt, max_tokens=30,
+                                                     temperature=0.8, limbic_affect=current_affect)
+                thought_sentiment = analyze_sentiment(thought).to(device)
+                with model_lock:
+                    target_affect = current_affect.squeeze(0).squeeze(0).clone()
+                    target_affect[:6] = target_affect[:6] + thought_sentiment
+                    limbic_system.learn_continuously(pc_state, target_affect.unsqueeze(0).unsqueeze(0))
             print(f"  [METACOGNITION] Cycle {cycle} | {mood_label} | '{thought[:60]}'")
             if mood_idx == 4 and current_affect.norm().item() > 15.0:
                 action_queue.put_nowait(("SPEAK", thought[:200]))
@@ -2892,6 +2888,9 @@ def background_sleeper():
 # ==================================================================
 # STATE PERSISTENCE (Phase 16: Brain Save/Load)
 # ==================================================================
+_BRAIN_IO_LOCK = threading.RLock()
+
+
 def save_brain():
     """Saves Aether's full brain state to disk — model, EWC, memory, cognitive map."""
     print(f"\n[BRAIN SAVE] Saving to {BRAIN_SAVE_PATH} ...")
@@ -2916,8 +2915,19 @@ def save_brain():
         "limbic_fisher_matrix": {k: v.cpu() for k, v in limbic_system.fisher_matrix.items()},
         "limbic_optimal_weights": {k: v.cpu() for k, v in limbic_system.optimal_weights.items()},
         "mood_classifier": limbic_system.mood_classifier.state_dict(),
+        "version": SNAPSHOT_VERSION,
     }
-    torch.save(snapshot, BRAIN_SAVE_PATH)
+    tmp_path = BRAIN_SAVE_PATH + ".tmp"
+    with _BRAIN_IO_LOCK:
+        try:
+            torch.save(snapshot, tmp_path)
+            os.replace(tmp_path, BRAIN_SAVE_PATH)
+        except Exception as exc:
+            if os.path.exists(tmp_path):
+                try: os.remove(tmp_path)
+                except OSError: pass
+            print(f"[BRAIN SAVE ERROR] {exc}")
+            save_persona(); genome.save(); return
     save_persona()
     genome.save()
     print("[BRAIN SAVE] Complete.\n")
@@ -2929,7 +2939,17 @@ def load_brain():
         print("[BRAIN LOAD] No past life found. Starting fresh.")
         return False
     print(f"\n[BRAIN LOAD] Loading from {BRAIN_SAVE_PATH} ...")
-    snapshot = torch.load(BRAIN_SAVE_PATH, map_location=device)
+    try:
+        snapshot = torch.load(BRAIN_SAVE_PATH, map_location=device)
+    except Exception as exc:
+        # Cheap insurance against a truncated/corrupt .pt (e.g. from a crash before the
+        # atomic-save fix shipped). Treat like a version mismatch: discard + retrain.
+        print(f"[BRAIN LOAD] Checkpoint unreadable ({exc}); discarding to retrain.")
+        return False
+    if snapshot.get("version") != SNAPSHOT_VERSION:
+        print(f"[BRAIN LOAD] Snapshot version {snapshot.get('version')} != {SNAPSHOT_VERSION}; "
+              f"discarding to avoid shape mismatch. Full retrain will follow.")
+        return False
     model.load_state_dict(snapshot["model_state"])
     fisher_matrix.update({k: v.to(device) for k, v in snapshot["fisher_matrix"].items()})
     ewc_optimal_weights.update({k: v.to(device) for k, v in snapshot["ewc_optimal_weights"].items()})
@@ -3931,19 +3951,26 @@ if __name__ == "__main__":
     # load instead of timing out through the whole boot window.
     if _args.ipc:
         _ipc_init()
-    # Phase 0: Continuous Manifold Core Calibration (fixes generalization)
-    _set_boot_phase(BOOT_PHASE_CALIBRATING)
-    calibrate_affective_core_v2(limbic_system, device)
-    # Phase 0.5: Train MoodClassifier on the frozen core outputs (fixes FATIGUED/HUNGRY split)
-    _set_boot_phase(BOOT_PHASE_FISHER)
-    train_mood_classifier_v3(limbic_system, limbic_system.mood_classifier, device)
-    # Populate EWC from the 6 anchor states so learn_continuously applies penalty
-    anchors = torch.tensor([[0.9,0.1,0.1,0.0,0.0,0.0],[0.1,0.9,0.1,0.0,0.0,0.0],
-                            [0.1,0.1,0.9,0.0,0.0,0.0],[0.0,0.0,0.0,0.9,0.1,0.1],
-                            [0.0,0.0,0.0,0.1,0.9,0.1],[0.0,0.0,0.0,0.1,0.1,0.9]],
-                           dtype=torch.float32, device=device)
-    limbic_system.compute_fisher(anchors)
-    # Phase 1: Direct Semantic Bridge calibration
+    # Load any prior brain FIRST so a compatible snapshot can skip the expensive
+    # Phase 0 / 0.5 retraining (classifier + manifold Fisher are persisted).
+    _brain_loaded = load_brain()
+    if not _brain_loaded:
+        # Phase 0: Continuous Manifold Core Calibration (fixes generalization)
+        _set_boot_phase(BOOT_PHASE_CALIBRATING)
+        calibrate_affective_core_v2(limbic_system, device)
+        # Phase 0.5: Train MoodClassifier on the frozen core outputs (fixes FATIGUED/HUNGRY split)
+        _set_boot_phase(BOOT_PHASE_FISHER)
+        train_mood_classifier_v3(limbic_system, limbic_system.mood_classifier, device)
+        # Populate EWC from the 6 anchor states so learn_continuously applies penalty
+        anchors = torch.tensor([[0.9,0.1,0.1,0.0,0.0,0.0],[0.1,0.9,0.1,0.0,0.0,0.0],
+                                [0.1,0.1,0.9,0.0,0.0,0.0],[0.0,0.0,0.0,0.9,0.1,0.1],
+                                [0.0,0.0,0.0,0.1,0.9,0.1],[0.0,0.0,0.0,0.1,0.1,0.9]],
+                                dtype=torch.float32, device=device)
+        limbic_system.compute_fisher(anchors)
+    else:
+        _set_boot_phase(BOOT_PHASE_CALIBRATING)
+        print("[BRAIN LOAD] Restored past life — skipping Phase 0 / 0.5 retraining.")
+    # Phase 1: Direct Semantic Bridge calibration (not persisted; runs every boot)
     _set_boot_phase(BOOT_PHASE_MODEL)
     calibrate_limbic_bridge(limbic_system, limbic_bridge, neocortex, device)
     neocortex.attach_bridge(limbic_bridge)
@@ -3969,7 +3996,6 @@ last_real_action = "WAIT"
 # Load past life state if available
 _auto_base_cycle = 0
 if __name__ == "__main__":
-    load_brain()
     _auto_base_cycle = cycle_count
     load_persona()
 
@@ -4261,6 +4287,7 @@ if __name__ == "__main__":
         raw_state_post = get_raw_state(world)
         prediction_error = sensory_forward_model.calculate_latent_fe(raw_state_pre, action_idx, raw_state_post)
         intrinsic_curiosity = curiosity_module.calculate_curiosity(raw_state_post)
+        last_prediction_error = prediction_error
 
         print(f"\n  [ACTION] {action}")
         print(f"  [RESULT] {new_obs}")

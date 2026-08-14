@@ -330,6 +330,73 @@ telemetry + Tier 3 signing scaffold.
   `[BOOT] phase=ONLINE_RUNNING`, `get_status` answered, and the 4.0 MB brain file
   landed in LOCALAPPDATA with no `code 5`/`Traceback`. Regression suite + QML
   smoke green.
-- Note: the 5x `[PYI-...:ERROR] Failed to extract llama_cpp\lib` lines at the top
-  of the runtime log are from a PRIOR exe (the same log's later boots load
-  llama_cpp fine at 1-3s); not the current blocker.
+ - Note: the 5x `[PYI-...:ERROR] Failed to extract llama_cpp\lib` lines at the top
+   of the runtime log are from a PRIOR exe (the same log's later boots load
+   llama_cpp fine at 1-3s); not the current blocker.
+
+### Phase 6 (post-ship break/fix) -- runtime hardening from the frozen-run log (P0-P3)
+Driven by a real frozen-run traceback + user analysis. All fixes in
+`src/alison_core.py`; verified by booting the rebuilt `ALISON_Core.exe`.
+
+- **P0 -- memory-consolidation crash (device mismatch)**: `background_sleeper` ->
+  `sleep_consolidate` -> `AgentLM.forward` did `torch.cat([sensory_token, x])`
+  where `grounded_state` was stored CPU-side (`wake_cycle_record`,
+  `:4289` `grounded_state.detach().cpu()`) but `input_ids` were CUDA -> `RuntimeError`
+  (cuda vs cpu) in Thread-9. Fix at `:199` and `:223`:
+  `sensory_token = grounded_state.to(input_ids.device).unsqueeze(0).unsqueeze(0)`.
+  This also closes the same latent crash in `train_step_with_sensory` (`:1957`) and
+  `calculate_latent_prediction_error` (`:2167`) -- all route through `forward`.
+  - **Verification**: 6x `[SCHEDULED SLEEP]` / `DEEP SLEEP` consolidations ran, each
+    printing a `Replay Loss` (forward pass completed); `*.err` log empty -- no Thread-9
+    `RuntimeError`.
+
+- **P1a -- metacognition quality**: `Neocortex.generate` kwargs (`:1546`) now add
+  `repeat_penalty=1.18, frequency_penalty=0.4, presence_penalty=0.2` (kills the
+  "worried worried..." loop); `_format_chat` (`:1530`) strips a leading
+  `<|begin_of_text|>` (llama_cpp already prepends one -> removes the duplicate-BOS
+  `RuntimeWarning`); removed a dead duplicate `generate_thought` (`:1582`) that
+  shadowed the real one (`:1573`).
+
+- **P1b -- defensive brain-save + corrupt-checkpoint insurance**: added
+  `_BRAIN_IO_LOCK = threading.RLock()`; `save_brain` (`:2895`) writes to `*.tmp` then
+  `os.replace()` (atomic) under the lock, with `try/except` -> `[BRAIN SAVE ERROR]`
+  instead of a half-written file. `load_brain` (`:2933`) wraps `torch.load` in
+  `try/except` so any unreadable/truncated `.pt` (incl. pre-fix corruption) logs and
+  `return False` (falls through to retrain) -- same as a version mismatch. New
+  checkpoints can't corrupt; stale ones degrade gracefully.
+
+- **P2a -- skip Phase 0/0.5 on compatible restore**: `save_brain` snapshot now carries
+  `"version": SNAPSHOT_VERSION` (3); `load_brain` rejects
+  `snapshot.get("version") != SNAPSHOT_VERSION` (`.get` -> pre-versioning checkpoints
+  -> `None != 3` -> clean retrain, no KeyError). Boot reordered so `load_brain()` runs
+  BEFORE `calibrate_affective_core_v2` (`:3936`) / `train_mood_classifier_v3` (`:3939`)
+  / `compute_fisher`, guarded by `if not _brain_loaded:`; Phase 1
+  `calibrate_limbic_bridge` (`:3948`, not persisted) still runs every boot.
+  - **Verification**: run #1 (old no-version brain) -> `[BRAIN LOAD] Snapshot version
+    None != 3; discarding... Full retrain`. Run #2 (fresh v3 brain) ->
+    `[BRAIN LOAD] Restored past life - skipping Phase 0 / 0.5 retraining.`
+
+- **P2b -- mute subcortical text -> latent norms**: `CorticalModule.process` (`:1975`),
+  `TheoryOfMindModule.process` (`:1991`), and `MEMORY` (`:2537`) stopped calling
+  `generate_text` on the 844K char-level model (decoding collapsed to garbage) and now
+  emit activation markers (`[act=...]`, `[ToM act=...]`, `[MEM act=...]`). Readable
+  text stays reserved for the 8B `METACOGNITION`. The stage print (`:4121`) shows norms.
+  - **Expected behavior change (NOT a regression)**: calm cycles now emit only latent
+    norms; the 8B narration appears only on prediction-error spikes.
+
+- **P3 -- EFE-threshold gate for the 8B**: `EFE_THRESHOLD = 0.35`; main loop sets
+  `last_prediction_error` (`:4289`). Gated behind `last_prediction_error > EFE_THRESHOLD`:
+  `stream_of_consciousness` deep-thought (`:2744`, every 5th idle), `metacognitive_loop`
+  (`:2826`, 30s), and `self_reflect` (`:1824`, every 20 cycles). `update_self_model`
+  (`:1674`, user-chat driven) is deliberately left ungated. Threshold sanity-checked
+  vs the log (Sensory PE sat 0.10-0.25; spikes 0.30-0.42).
+  - **Verification**: live run showed `NEOCORTEX SUBCONSCIOUS` = 0 and
+    `METACOGNITION: Evolving` = 0 on calm cycles (PE 0.16-0.22 < 0.35).
+
+- **Regression**: 4/4 tests green (action_security, screenpipe_bridge,
+  larimar_unbinding, job_containment); GUI module offscreen-import smoke OK.
+- **Build**: rebuilt Core/GUI/installer via detached lock-file chain. Core exe
+  (2745 MB) and GUI exe (75.5 MB) rebuilt with these edits. Installer (Inno LZMA of the
+  2.7 GB bundle) still finalizing in background at commit time.
+- **Open**: "Add Mic and Speaker settings" -- separate, underspecified feature
+  (GUI audio-device selection for STT/TTS?); awaiting user scope before implementation.
