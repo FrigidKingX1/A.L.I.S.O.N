@@ -12,6 +12,12 @@ import sys
 import time
 import threading
 
+# Force QtQuick.Controls to the Fusion style. The default (platform) Windows
+# style needs Qt6QuickControls2WindowsStyleImpl.dll, which is not shipped in
+# the PyQt6 bundle (or the frozen exe); the missing plugin makes any ComboBox
+# fail to instantiate and blanks the whole QML window. Fusion is bundled.
+os.environ.setdefault("QT_QUICK_CONTROLS_STYLE", "Fusion")
+
 # Allow importing the engine-side bridge (alison_ipc) from the engine source
 # tree (A.L.I.S.O.N/src) regardless of the current working directory.
 ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")

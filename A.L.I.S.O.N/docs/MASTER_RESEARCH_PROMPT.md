@@ -429,3 +429,27 @@ Driven by a real frozen-run traceback + user analysis. All fixes in
   (post-rebuild) answered `list_audio_devices` with the real device list and
   `set_audio_device` updated config for both directions. Rebuilt Core/GUI/installer
   (detached chain); `ALISON_Setup.exe` produced.
+
+## Phase 8 -- Fix: GUI white screen after Phase 7 (QtQuick.Controls Windows style)
+
+- **Symptom**: after shipping Phase 7, the GUI window rendered all-white (no panels,
+  no text). Only the window itself appeared.
+- **Root cause**: QtQuick.Controls defaults to the platform ("Windows") style on
+  Windows. The Windows style's `ComboBox` (and other native-popup controls) import
+  `QtQuick/Controls/Windows/impl`, which needs `qtquickcontrols2windowsstyleimplplugin.dll`
+  plus the runtime lib `Qt6QuickControls2WindowsStyleImpl.dll`. Neither ships in this
+  PyQt6 wheel/venv (the venv `Qt6\bin` lacks the dll), and PyInstaller's
+  `Analysis-00.toc` collected neither the impl plugin nor the runtime lib. Any
+  ComboBox instantiation then fails with
+  `Type ComboBox unavailable: Cannot load library ... The specified module could not be found`,
+  which breaks SettingsPanel and therefore the whole QML root -> blank white window.
+  Buttons previously worked because the Windows style's Button only needs the base
+  `qtquickcontrols2implplugin.dll`, which IS bundled.
+- **Fix**: force the fully-bundled Fusion style before any Qt init in
+  `alison_gui.py` (module top): `os.environ.setdefault("QT_QUICK_CONTROLS_STYLE", "Fusion")`.
+  Fusion's runtime lib (`Qt6QuickControls2Fusion.dll`, `Qt6QuickControls2FusionStyleImpl.dll`)
+  and `QtQuick/Controls/Fusion/` QML tree were already in the bundle, so no packaging
+  change was needed and the same fix covers the dev-venv path.
+- **Verification**: offscreen `QQuickView` load of `main.qml` with the real Bridge:
+  was `Status.Error` (ComboBox unavailable) before, now `Status.Ready` with zero QML
+  errors. GUI + installer rebuilt (detached chain).
