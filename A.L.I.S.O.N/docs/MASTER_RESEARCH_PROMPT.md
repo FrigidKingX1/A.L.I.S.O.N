@@ -308,3 +308,28 @@ telemetry + Tier 3 signing scaffold.
 - Relaunch the rebuilt GUI, open Settings, confirm live boot phase + GPU line.
 - Tier 3: real privileged-action policy + key management (scaffold only).
 - Screenpipe: still OFF by default (set `ALISON_SCREENPIPE=1` to enable).
+
+### Phase 5 (post-ship break/fix) -- Core crash on boot: access-denied toddler save
+- **Symptom**: frozen `ALISON_Core.exe` died during boot with
+  `RuntimeError: [enforce fail at inline_container.cc:745] . open file failed
+  with error code: 5` (Win32 `ERROR_ACCESS_DENIED`). Root cause:
+  `run_deep_toddler_phase_v2` (`alison_core.py`) did `torch.save(...,
+  "ica_toddler_brain_v2.pth")` with a **bare relative path**; under a read-only
+  working directory (e.g. installed/Program-Files CWD, or a GUI spawn whose CWD
+  is protected) the save failed and the uncaught exception killed the process
+  before the consciousness loop. Not a Phase 1-4 regression -- that function was
+  never touched; it only surfaced because the user now runs the installed build.
+- **Fix** (`src/alison_core.py`): `checkpoint_path` now resolves to
+  `os.path.join(app_state_dir(), "ica_toddler_brain_v2.pth")` (UAC-safe
+  `%LOCALAPPDATA%\A.L.I.S.O.N.`, mirroring `BRAIN_SAVE_PATH`). Load and save are
+  wrapped in `try/except` so a bad path degrades to a `[TODDLER][warn]` instead of
+  a boot crash.
+- **Verification**: rebuilt Core/GUI/installer (detached lock-file chain); booted
+  the frozen exe from a confirmed read-only CWD -> `Cognitive Curriculum complete
+  ... (C:\Users\dgc12\AppData\Local\A.L.I.S.O.N.\ica_toddler_brain_v2.pth)`,
+  `[BOOT] phase=ONLINE_RUNNING`, `get_status` answered, and the 4.0 MB brain file
+  landed in LOCALAPPDATA with no `code 5`/`Traceback`. Regression suite + QML
+  smoke green.
+- Note: the 5x `[PYI-...:ERROR] Failed to extract llama_cpp\lib` lines at the top
+  of the runtime log are from a PRIOR exe (the same log's later boots load
+  llama_cpp fine at 1-3s); not the current blocker.

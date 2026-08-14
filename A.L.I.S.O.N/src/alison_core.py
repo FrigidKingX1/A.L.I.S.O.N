@@ -3432,16 +3432,24 @@ def generate_curriculum_data(world, other_agent, num_examples=50):
 def run_deep_toddler_phase_v2(world, other_agent, model):
     """Cognitive curriculum: teaches full cognitive trace (Obs→Emotion→Action→NextObs)."""
     global fisher_matrix, ewc_optimal_weights
-    checkpoint_path = "ica_toddler_brain_v2.pth"
+    # Route to a writable, per-user path. Frozen builds -> %LOCALAPPDATA%,
+    # dev -> CWD. A bare relative path crashes under a read-only working
+    # directory (e.g. the installed Program Files location) with
+    # ERROR_ACCESS_DENIED on torch.save, killing boot before the loop starts.
+    checkpoint_path = os.path.join(app_state_dir(), "ica_toddler_brain_v2.pth")
 
     if os.path.exists(checkpoint_path):
-        print("Loading past life memories (V2 Checkpoint)...")
-        checkpoint = torch.load(checkpoint_path, map_location=device)
-        model.load_state_dict(checkpoint['model'])
-        fisher_matrix = checkpoint.get('fisher', {})
-        ewc_optimal_weights = checkpoint.get('optimal', {})
-        model.eval()
-        return
+        try:
+            print("Loading past life memories (V2 Checkpoint)...")
+            checkpoint = torch.load(checkpoint_path, map_location=device)
+            model.load_state_dict(checkpoint['model'])
+            fisher_matrix = checkpoint.get('fisher', {})
+            ewc_optimal_weights = checkpoint.get('optimal', {})
+            model.eval()
+            return
+        except Exception as exc:
+            print(f"[TODDLER][warn] could not load V2 checkpoint ({exc}); "
+                  f"re-running cognitive curriculum")
 
     print("\n" + "=" * 60)
     print("PHASE 0: COGNITIVE CURRICULUM (1000 Steps)")
@@ -3509,13 +3517,20 @@ def run_deep_toddler_phase_v2(world, other_agent, model):
             print(f"  [Cognitive Step {i+1}/1000] Loss: {loss.item():.4f}")
 
     print("Saving V2 brain state to disk...")
-    torch.save({
-        'model': model.state_dict(),
-        'fisher': fisher_matrix,
-        'optimal': ewc_optimal_weights
-    }, checkpoint_path)
+    try:
+        os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
+        torch.save({
+            'model': model.state_dict(),
+            'fisher': fisher_matrix,
+            'optimal': ewc_optimal_weights
+        }, checkpoint_path)
+        print(f"Cognitive Curriculum complete. Full cognitive trace learned. "
+              f"({checkpoint_path})")
+    except Exception as exc:
+        print(f"[TODDLER][warn] could not save V2 brain state ({exc}); "
+              f"continuing without persistence")
     model.eval()
-    print("Cognitive Curriculum complete. Full cognitive trace learned.\n")
+    print()
 
 
 world = DynamicWorld()
