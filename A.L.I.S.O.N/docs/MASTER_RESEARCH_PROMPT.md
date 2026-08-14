@@ -400,3 +400,32 @@ Driven by a real frozen-run traceback + user analysis. All fixes in
   2.7 GB bundle) still finalizing in background at commit time.
 - **Open**: "Add Mic and Speaker settings" -- separate, underspecified feature
   (GUI audio-device selection for STT/TTS?); awaiting user scope before implementation.
+
+## Phase 7 -- Mic / Speaker audio-device selection (GUI Settings + config.json)
+
+- **Scope (user)**: GUI Settings tab lets the user pick the mic (STT/wake-word) and
+  speaker (TTS) independently; the selection persists to `config.json` and is applied at
+  voice-pipeline init on next boot.
+- **Config contract**: on-disk keys `audio_input_device` / `audio_output_device`
+  (int index, or `-1`/absent = system default). `load_audio_config()` maps them to
+  in-memory `input_device`/`output_device`; `save_audio_config()` merges (never
+  clobbers). `AlisonIPC` control handler gained `list_audio_devices` (enumerates
+  `sounddevice.query_devices`, splits by max_input/max_output channels) and
+  `set_audio_device` (`kind` in {input,output}, `index` int or `-1`).
+- **Wiring**: `alison_gui.py` Bridge -- `audioDevicesChanged` signal,
+  `audioInputs/audioOutputs/audioInputDevice/audioOutputDevice` QProperties,
+  `refreshAudioDevices()` (prepends a "System default (recommended)" row at index -1)
+  and `setAudioDevice()` slots; refreshed on launch + a 30 s diag timer.
+  `SettingsPanel.qml` -- new "AUDIO DEVICES" section with two ComboBoxes bound to
+  `bridge.audioInputs/audioOutputs`. `alison_voice.Voice.__init__` and `alison_ear`
+  resolve the device from config; `-1`/None both normalize to `None` (sounddevice
+  default).
+- **Bug fixed during impl**: the two handler branches were first inserted *inside* the
+  `set_wakeword` block (after its `return`), making them unreachable dead code and
+  dropping the function's `unknown command` fallback (handler returned `None` -> IPC
+  `recv_json` got `b'null'`). Corrected the indentation; re-verified end to end.
+- **Verification**: `py_compile` green on all 4 modules; in-process handler call
+  enumerated 88 inputs / 100 outputs and round-tripped set/get; live frozen Core
+  (post-rebuild) answered `list_audio_devices` with the real device list and
+  `set_audio_device` updated config for both directions. Rebuilt Core/GUI/installer
+  (detached chain); `ALISON_Setup.exe` produced.

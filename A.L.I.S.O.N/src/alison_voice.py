@@ -18,6 +18,13 @@ import time
 MODELS_DIR = None  # resolved lazily from alison_core if present
 
 
+def _norm_device(dev):
+    """Normalise a device selection: -1 or None both mean 'system default'."""
+    if dev is None or dev == -1:
+        return None
+    return dev
+
+
 def _resolve_models_dir():
     global MODELS_DIR
     if MODELS_DIR is not None:
@@ -31,9 +38,23 @@ def _resolve_models_dir():
 
 
 class Voice:
-    def __init__(self, stt_model="base", tts_voice="af_heart"):
+    def __init__(self, stt_model="base", tts_voice="af_heart",
+                 input_device=None, output_device=None):
         self.stt_model = stt_model
         self.tts_voice = tts_voice
+        # Resolve device selection from persisted config when not explicitly set.
+        if input_device is None or output_device is None:
+            try:
+                import alison_core
+                cfg = alison_core.load_audio_config()
+                if input_device is None:
+                    input_device = cfg.get("input_device")
+                if output_device is None:
+                    output_device = cfg.get("output_device")
+            except Exception:
+                pass
+        self.input_device = _norm_device(input_device)
+        self.output_device = _norm_device(output_device)
         self._stt = None
         self._tts = None
         self._level = 0.0
@@ -84,7 +105,7 @@ class Voice:
             try:
                 with sd.InputStream(
                     channels=1, samplerate=self._sample_rate,
-                    blocksize=1024, dtype="float32",
+                    blocksize=1024, dtype="float32", device=self.input_device,
                 ) as stream:
                     while self._meter_running:
                         data, _ = stream.read(1024)
@@ -117,6 +138,7 @@ class Voice:
         audio = sd.rec(
             int(duration * self._sample_rate),
             samplerate=self._sample_rate, channels=1, dtype="float32",
+            device=self.input_device,
         )
         sd.wait()
         audio = np.squeeze(audio)
@@ -133,5 +155,5 @@ class Voice:
         pipeline = self._ensure_tts()
         for _, _, audio in pipeline(text, voice=self.tts_voice):
             if audio is not None and len(audio):
-                sd.play(audio, samplerate=24000)
+                sd.play(audio, samplerate=24000, device=self.output_device)
                 sd.wait()

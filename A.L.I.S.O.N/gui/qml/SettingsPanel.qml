@@ -232,6 +232,46 @@ Item {
                 }
             }
 
+            // ---------------- AUDIO DEVICES ----------------
+            Rectangle {
+                width: parent.width; height: audioCol.height + 28
+                color: THEME.bgSoft; radius: 8; border.color: "#1d2735"
+                Column {
+                    id: audioCol
+                    anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right
+                    anchors.margins: 14
+                    spacing: 10
+                    Text {
+                        text: "AUDIO DEVICES"
+                        color: THEME.cyan; font.pixelSize: 13; font.bold: true
+                        font.family: "Consolas, monospace"
+                    }
+                    Text { text: "Microphone (STT / wake-word)"; color: THEME.text; font.pixelSize: 11; font.family: "Consolas, monospace" }
+                    ComboBox {
+                        width: parent.width; height: 30
+                        model: bridge.audioInputs
+                        textRole: "name"
+                        currentIndex: {
+                            var i = bridge.audioInputs.findIndex(function(d){ return d.index === bridge.audioInputDevice })
+                            return i < 0 ? 0 : i
+                        }
+                        onActivated: bridge.setAudioDevice("input", model[index].index)
+                    }
+                    Text { text: "Speaker (TTS)"; color: THEME.text; font.pixelSize: 11; font.family: "Consolas, monospace" }
+                    ComboBox {
+                        width: parent.width; height: 30
+                        model: bridge.audioOutputs
+                        textRole: "name"
+                        currentIndex: {
+                            var i = bridge.audioOutputs.findIndex(function(d){ return d.index === bridge.audioOutputDevice })
+                            return i < 0 ? 0 : i
+                        }
+                        onActivated: bridge.setAudioDevice("output", model[index].index)
+                    }
+                    Text { text: "System default = OS-selected device. Choice applies on next capture/playback."; color: THEME.muted; font.pixelSize: 10; font.family: "Consolas, monospace"; wrapMode: Text.WrapAnywhere; width: parent.width }
+                }
+            }
+
             // ---------------- LOG TAIL ----------------
             Rectangle {
                 width: parent.width; height: 240

@@ -105,6 +105,14 @@ def run_ear(user_input_queue, ear_request_queue, wakeword_getter, ipc):
         print(f"[EAR][warn] Whisper STT init failed ({exc}); mic disabled.")
         return
 
+    mic_device = None
+    try:
+        import alison_core
+        _raw = alison_core.load_audio_config().get("input_device")
+        mic_device = None if (_raw is None or _raw == -1) else _raw
+    except Exception:
+        pass
+
     print("[EAR] Listening (CPU Whisper, base.en, int8).")
     _publish_state(ipc, "idle")
 
@@ -118,7 +126,7 @@ def run_ear(user_input_queue, ear_request_queue, wakeword_getter, ipc):
                     pass
                 _publish_state(ipc, "listening")
                 with sd.InputStream(samplerate=SAMPLE_RATE, channels=1,
-                                   dtype="float32", blocksize=1024) as stream:
+                                    dtype="float32", blocksize=1024, device=mic_device) as stream:
                     audio = _record_until_silence(stream, SAMPLE_RATE)
                 text = _transcribe(model, audio)
                 if text:
@@ -131,7 +139,7 @@ def run_ear(user_input_queue, ear_request_queue, wakeword_getter, ipc):
             # --- Ambient wake-word sweep ---
             if wakeword_getter():
                 with sd.InputStream(samplerate=SAMPLE_RATE, channels=1,
-                                   dtype="float32", blocksize=1024) as stream:
+                                    dtype="float32", blocksize=1024, device=mic_device) as stream:
                     # Fixed short buffer for the wake-word scan.
                     probe, _ = stream.read(int(SAMPLE_RATE * 1.5))
                 probe = np.asarray(probe, dtype=np.float32)[:, 0]
@@ -140,7 +148,7 @@ def run_ear(user_input_queue, ear_request_queue, wakeword_getter, ipc):
                     print(f"\n  >>> [EAR][WAKE] detected: {probe_text}")
                     _publish_state(ipc, "listening")
                     with sd.InputStream(samplerate=SAMPLE_RATE, channels=1,
-                                       dtype="float32", blocksize=1024) as stream:
+                                        dtype="float32", blocksize=1024, device=mic_device) as stream:
                         audio = _record_until_silence(stream, SAMPLE_RATE,
                                                       silence_ms=900)
                     text = _transcribe(model, audio)

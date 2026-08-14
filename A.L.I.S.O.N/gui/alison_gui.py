@@ -44,6 +44,7 @@ class Bridge(QObject):
     overlayRequested = pyqtSignal(bool)         # show?
     statusChanged = pyqtSignal()
     diagnosticsChanged = pyqtSignal()
+    audioDevicesChanged = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -57,6 +58,10 @@ class Bridge(QObject):
         self._pop_count = 0
         self._listening = False
         self._stop_requested = False
+        self._audio_inputs = []
+        self._audio_outputs = []
+        self._audio_input_device = -1
+        self._audio_output_device = -1
         self._diagnostics = {
             "coreVersion": "", "bootPhase": "", "uptime_s": 0, "device": "",
             "gpuName": "", "ramGB": 0.0, "vramGB": 0.0, "modelLoaded": False,
@@ -120,6 +125,63 @@ class Bridge(QObject):
     def diagnostics(self):
         """Live diagnostics map surfaced to the QML settings tab."""
         return self._diagnostics
+
+    # --- audio device selection (mic for STT, speaker for TTS) ---
+    @pyqtProperty("QVariantList", notify=audioDevicesChanged)
+    def audioInputs(self):
+        return self._audio_inputs
+
+    @pyqtProperty("QVariantList", notify=audioDevicesChanged)
+    def audioOutputs(self):
+        return self._audio_outputs
+
+    @pyqtProperty(int, notify=audioDevicesChanged)
+    def audioInputDevice(self):
+        return self._audio_input_device if self._audio_input_device is not None else -1
+
+    @pyqtProperty(int, notify=audioDevicesChanged)
+    def audioOutputDevice(self):
+        return self._audio_output_device if self._audio_output_device is not None else -1
+
+    @pyqtSlot()
+    def refreshAudioDevices(self):
+        """Ask the Core to enumerate audio devices + report the saved selection."""
+        try:
+            cctx, creq = alison_ipc.AlisonIPC.make_control()
+            import zmq
+            creq.setsockopt(zmq.RCVTIMEO, 3000)
+            creq.setsockopt(zmq.LINGER, 0)
+            creq.send_json({"cmd": "list_audio_devices"})
+            r = creq.recv_json()
+            creq.close()
+            cctx.term()
+            if r.get("ok"):
+                # Prepend a system-default option so the user can reset either role.
+                self._audio_inputs = [{"index": -1, "name": "System default (recommended)"}] + r.get("inputs", [])
+                self._audio_outputs = [{"index": -1, "name": "System default (recommended)"}] + r.get("outputs", [])
+                self._audio_input_device = r.get("input_device") if r.get("input_device") is not None else -1
+                self._audio_output_device = r.get("output_device") if r.get("output_device") is not None else -1
+                self.audioDevicesChanged.emit()
+        except Exception as exc:
+            self.eventReceived.emit("control", f"list_audio_devices ERROR: {exc}")
+
+    @pyqtSlot(str, int)
+    def setAudioDevice(self, kind, index):
+        """Persist a mic/speaker choice to config.json via the Core."""
+        try:
+            cctx, creq = alison_ipc.AlisonIPC.make_control()
+            import zmq
+            creq.setsockopt(zmq.RCVTIMEO, 3000)
+            creq.setsockopt(zmq.LINGER, 0)
+            idx = None if (index is None or index < 0) else index
+            creq.send_json({"cmd": "set_audio_device", "kind": kind, "index": idx})
+            r = creq.recv_json()
+            creq.close()
+            cctx.term()
+            self.eventReceived.emit("control", f"set_audio_device {kind} -> {r}")
+            self.refreshAudioDevices()
+        except Exception as exc:
+            self.eventReceived.emit("control", f"set_audio_device ERROR: {exc}")
 
     # --- called from worker threads ---
     def push_telemetry(self, affect, gamma, drives):
@@ -560,10 +622,12 @@ def main():
 
     # Diagnostics for the settings tab: keep paths/model/log/status fresh.
     bridge.refreshDiagnostics()
+    bridge.refreshAudioDevices()
     diag = QTimer()
     diag.setInterval(3000)
     diag.timeout.connect(bridge.refreshDiagnostics)
     diag.timeout.connect(bridge.fetchStatus)
+    diag.timeout.connect(bridge.refreshAudioDevices)
     diag.start()
 
     # Clean shutdown: terminate the Core child process when the GUI exits so it

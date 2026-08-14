@@ -2577,6 +2577,53 @@ SNAPSHOT_VERSION = 3
 EFE_THRESHOLD = 0.35
 last_prediction_error = 0.0
 
+# ---------------------------------------------------------------------------
+# Audio device selection (mic for STT/wake-word, speaker for TTS). Persisted
+# to config.json so the GUI Settings tab and the Core agree on the choice.
+# ---------------------------------------------------------------------------
+AUDIO_CONFIG_PATH = os.path.join(app_state_dir(), "config.json")
+
+
+def load_audio_config():
+    """Read persisted audio-device selection.
+
+    Returns {"input_device": int|None, "output_device": int|None}; None means
+    use the system default for that direction.
+    """
+    try:
+        if os.path.exists(AUDIO_CONFIG_PATH):
+            with open(AUDIO_CONFIG_PATH, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            return {
+                "input_device": cfg.get("audio_input_device", None),
+                "output_device": cfg.get("audio_output_device", None),
+            }
+    except Exception:
+        pass
+    return {"input_device": None, "output_device": None}
+
+
+def save_audio_config(input_device=None, output_device=None):
+    """Persist audio-device selection to config.json (merges, never clobbers)."""
+    cfg = {}
+    if os.path.exists(AUDIO_CONFIG_PATH):
+        try:
+            with open(AUDIO_CONFIG_PATH, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+        except Exception:
+            cfg = {}
+    if input_device is not None:
+        cfg["audio_input_device"] = input_device
+    if output_device is not None:
+        cfg["audio_output_device"] = output_device
+    try:
+        os.makedirs(os.path.dirname(AUDIO_CONFIG_PATH), exist_ok=True)
+        with open(AUDIO_CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+    except Exception:
+        pass
+    return cfg
+
 class _TrackedLock:
     """threading.Lock wrapper that records the holding thread, for diagnosing
     the long `model_lock` stalls seen in the live loop. Prints a one-shot
@@ -3743,6 +3790,30 @@ def _ipc_control_handler(cmd):
         global _ear_wakeword_enabled
         _ear_wakeword_enabled = bool(cmd.get("enabled", True))
         return {"ok": True, "wakeword": _ear_wakeword_enabled}
+    if action == "list_audio_devices":
+        try:
+            import sounddevice as sd
+            devs = sd.query_devices()
+            inputs = [{"index": i, "name": d["name"]}
+                      for i, d in enumerate(devs) if d.get("max_input_channels", 0) > 0]
+            outputs = [{"index": i, "name": d["name"]}
+                       for i, d in enumerate(devs) if d.get("max_output_channels", 0) > 0]
+            cfg = load_audio_config()
+            return {"ok": True, "inputs": inputs, "outputs": outputs,
+                    "input_device": cfg["input_device"],
+                    "output_device": cfg["output_device"]}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+    if action == "set_audio_device":
+        kind = cmd.get("kind")
+        idx = cmd.get("index")
+        if kind == "input":
+            save_audio_config(input_device=idx)
+        elif kind == "output":
+            save_audio_config(output_device=idx)
+        else:
+            return {"ok": False, "error": "kind must be 'input' or 'output'"}
+        return {"ok": True, "config": load_audio_config()}
     return {"ok": False, "error": f"unknown command: {action}"}
 
 
