@@ -3677,6 +3677,9 @@ def dispatch_action(action_obj, confirmed=False):
     return action_executor.execute(action_obj, confirmed=confirmed)
 
 
+# Campaign memory ingested from the Auto-DM engine (Phase 3 memory sync).
+ttrpg_memory_log = []
+
 def _ipc_control_handler(cmd):
     """Dispatch GUI control commands. Returns a JSON-serializable reply dict."""
     action = (cmd or {}).get("cmd")
@@ -3814,6 +3817,48 @@ def _ipc_control_handler(cmd):
         else:
             return {"ok": False, "error": "kind must be 'input' or 'output'"}
         return {"ok": True, "config": load_audio_config()}
+
+    # ---- Auto-DM (TTRPG) integration verbs ---------------------------------
+    if action == "ttrpg_resolve":
+        prompt = (cmd.get("prompt") or "").strip()
+        system_prompt = cmd.get("system_prompt")
+        grammar = cmd.get("grammar")
+        max_tokens = int(cmd.get("max_tokens", 400))
+        temperature = float(cmd.get("temperature", 0.7))
+        if not prompt:
+            return {"ok": False, "error": "missing prompt"}
+        if neocortex is None or neocortex.model is None:
+            return {"ok": False, "error": "neocortex unavailable (model not loaded)"}
+        try:
+            text = neocortex.generate(
+                prompt,
+                system_prompt=system_prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                grammar=grammar,
+            )
+            return {"ok": True, "text": text}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    if action == "ttrpg_affect":
+        try:
+            from alison_ipc import AlisonIPC
+            affect, gamma, drives = AlisonIPC.read_telemetry_full()
+            return {"ok": True, "gamma": gamma, "drives": drives}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    if action == "ttrpg_ingest":
+        entry = cmd.get("entry") or {}
+        ttrpg_memory_log.append({
+            "speaker": entry.get("speaker", ""),
+            "content": entry.get("content", ""),
+            "scene_id": entry.get("scene_id"),
+            "timestamp": time.time(),
+        })
+        return {"ok": True, "count": len(ttrpg_memory_log)}
+
     return {"ok": False, "error": f"unknown command: {action}"}
 
 
